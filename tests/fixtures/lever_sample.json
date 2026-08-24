@@ -1,0 +1,11 @@
+[
+  {
+    "id": "abc-123",
+    "text": "Platform Engineer",
+    "hostedUrl": "https://jobs.lever.co/acme/abc-123",
+    "createdAt": 1735689600000,
+    "categories": {"location": "Remote"},
+    "descriptionPlain": "Build our internal platform.",
+    "additionalPlain": "Go and Kubernetes experience a plus."
+  }
+]

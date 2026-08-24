@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# runtime data — resumes, DB, screenshots, session state are all personal/local
+data/*
+!data/.gitkeep
+
+.env
+config/profile.yaml
+config/companies.yaml
+config/settings.yaml
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.DS_Store

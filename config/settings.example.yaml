@@ -1,0 +1,42 @@
+# Copy to config/settings.yaml and edit.
+
+search:
+  # Free-text keywords that must appear (case-insensitive) in title or
+  # description for a role to be kept after the cheap lexical filter.
+  keywords:
+    - "backend"
+    - "python"
+    - "platform"
+  exclude_keywords:
+    - "staff"
+    - "principal"
+    - "director"
+  locations:
+    - "remote"
+    - "united states"
+  remote_only: false
+  min_score: 65 # 0-100, from the Claude reranker; below this a job is discovered but not shortlisted
+
+aggregators:
+  adzuna:
+    enabled: false
+    what: "backend engineer"
+    where: "remote"
+  usajobs:
+    enabled: false
+    keyword: "software engineer"
+  remoteok:
+    enabled: true
+    tag: "python"
+  remotive:
+    enabled: true
+    category: "software-dev"
+
+submission:
+  # Only these ATS platforms have submission handlers implemented.
+  # Everything else is discovery/scoring only — you apply manually.
+  supported_ats:
+    - greenhouse
+    - lever
+  pacing_seconds_min: 45
+  pacing_seconds_max: 180

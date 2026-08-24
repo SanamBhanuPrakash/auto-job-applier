@@ -1,0 +1,36 @@
+# Copy to config/companies.yaml and edit.
+#
+# ATS job-board APIs have no "list all companies" endpoint — you must supply
+# each employer's board slug yourself. Find it by opening the company's
+# careers page: the URL or network tab reveals the slug, e.g.
+#   https://boards.greenhouse.io/stripe          -> greenhouse slug "stripe"
+#   https://jobs.lever.co/netflix                -> lever slug "netflix"
+#   https://jobs.ashbyhq.com/linear              -> ashby slug "linear"
+#
+# Seeded with a handful of well-known public boards so `jobbot discover`
+# works out of the box; replace with companies you actually care about.
+
+greenhouse:
+  - stripe
+  - airbnb
+  - coinbase
+  - robinhood
+  - pinterest
+  - instacart
+  - asana
+  - discord
+
+lever:
+  - plaid
+  - lever
+
+ashby:
+  - linear
+  - ramp
+
+smartrecruiters:
+  - Visa
+  - Bosch
+
+recruitee:
+  []
