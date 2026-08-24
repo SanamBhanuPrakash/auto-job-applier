@@ -12,7 +12,13 @@ from jobbot.submit.form_scan import FieldSpec
 console = Console()
 
 
-def show_review(job: Job, screenshot_path: Path, needs_human: list[FieldSpec]) -> None:
+def show_review(
+    job: Job,
+    screenshot_path: Path,
+    needs_human: list[FieldSpec],
+    memory_hints: dict[int, str] | None = None,
+) -> None:
+    memory_hints = memory_hints or {}
     console.rule(f"[bold]{job.title} @ {job.company}[/bold]")
     console.print(f"URL: {job.url}")
     console.print(f"Screenshot saved to: {screenshot_path}")
@@ -22,11 +28,12 @@ def show_review(job: Job, screenshot_path: Path, needs_human: list[FieldSpec]) -
         table.add_column("Label")
         table.add_column("Type")
         table.add_column("Required")
+        table.add_column("You answered before")
         for f in needs_human:
-            table.add_row(f.label, f.field_type, "yes" if f.required else "")
+            table.add_row(f.label, f.field_type, "yes" if f.required else "", memory_hints.get(f.field_id, ""))
         console.print(table)
     else:
-        console.print("[green]Every field was filled by the model.[/green]")
+        console.print("[green]Every field was filled (by the model or from memory).[/green]")
 
     console.print(
         "\n[bold yellow]The browser window is open on this application.[/bold yellow] "

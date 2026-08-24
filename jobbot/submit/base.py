@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 
 from jobbot.config import get_settings, load_profile_raw
 from jobbot.db import session_scope
+from jobbot.learning import store as learning_store
 from jobbot.models import Application, Job
 from jobbot.resume.schema import Profile
 from jobbot.submit import greenhouse, lever
@@ -65,7 +66,31 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
 
             fields = scan_form(page)
             job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:2000]}"
-            plan = build_fill_plan(profile, fields, job_context)
+
+            # Reuse answers this field's question has gotten before. Sensitive
+            # questions never get auto-filled from memory (only surfaced as a
+            # hint below); non-sensitive ones bypass the LLM call entirely.
+            with session_scope() as session:
+                matches = learning_store.match_fields(session, fields)
+                learned = {
+                    fid: {"value": m.value, "sensitive": m.sensitive, "times_used": m.times_used}
+                    for fid, m in matches.items()
+                }
+
+            memory_hints = {fid: h["value"] for fid, h in learned.items() if h["sensitive"]}
+            remembered_plan = {
+                fid: {
+                    "value": h["value"],
+                    "needs_human": False,
+                    "reasoning": f"Reused from memory (answered the same way {h['times_used']} time(s) before).",
+                }
+                for fid, h in learned.items()
+                if not h["sensitive"]
+            }
+            llm_fields = [f for f in fields if f.field_id not in remembered_plan]
+
+            plan = build_fill_plan(profile, llm_fields, job_context)
+            plan.update(remembered_plan)
 
             if settings.jobbot_resume_path.exists():
                 upload_resume(page, fields, settings.jobbot_resume_path)
@@ -75,7 +100,7 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             screenshot_path = settings.data_dir / "screenshots" / f"application_{app_id}.png"
             page.screenshot(path=str(screenshot_path), full_page=True)
 
-            show_review(job, screenshot_path, needs_human)
+            show_review(job, screenshot_path, needs_human, memory_hints)
 
             auto_submit = settings.jobbot_auto_submit if auto_submit_override is None else auto_submit_override
             if auto_submit and needs_human:
@@ -86,6 +111,13 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
                 auto_submit = False
 
             should_submit = auto_submit or confirm_submit(job)
+
+            # Capture whatever ended up in the form (auto-filled or typed by
+            # you) before the submit click potentially navigates the page
+            # away, so the next application to ask the same question already
+            # knows the answer.
+            with session_scope() as session:
+                learning_store.capture_from_page(session, page, fields)
 
             status = "skipped"
             error = ""

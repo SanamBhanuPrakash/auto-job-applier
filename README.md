@@ -26,6 +26,14 @@ part that gets people banned.
    proposes a fill plan using *only* facts from your profile, every field
    gets filled and verified, and then **you** review a screenshot and the
    list of fields it left blank before typing `yes` to actually submit.
+4. **Remember** — every field it fills (or you fill) gets captured under a
+   normalized version of its question text. The next application that asks
+   the same thing — even worded differently ("Are you authorized to work in
+   the US?" vs "Are you legally authorized to work in the United States?")
+   — reuses the answer instead of re-asking the model or you. This is what
+   makes it adapt over time instead of repeating the same LLM call (and, for
+   fields you had to type yourself, the same typing) on every single
+   application. See "Memory" below for exactly what is and isn't reused.
 
 ## What this deliberately does NOT do
 
@@ -63,13 +71,17 @@ jobbot/
   submit/
     form_scan.py           # generic DOM scanner (injects data-jobbot-id, handles
                             # native selects, react-aria comboboxes, radio groups)
+    values.py                # reads a field's current human-readable value (shared by verify + learning capture)
     fill_planner.py         # Claude fill plan + the hard-coded sensitive-field guardrail
     filler.py               # applies the plan, verifies, retries once on empty
     greenhouse.py lever.py  # just the submit-button selector + form-ready wait
-    review.py               # screenshot + terminal confirmation gate
+    review.py               # screenshot + terminal confirmation gate (now shows memory hints too)
     base.py                  # orchestrates one application attempt end to end
-  cli.py                   # typer CLI: discover / match / list / show / apply / batch / ledger
-  models.py, db.py         # SQLAlchemy: Job, JobScore, Application
+  learning/
+    normalize.py             # question label -> stable matching key
+    store.py                  # lookup/upsert/capture against the learned_answers table
+  cli.py                   # typer CLI: discover / match / list / show / apply / batch / ledger / learned
+  models.py, db.py         # SQLAlchemy: Job, JobScore, Application, LearnedAnswer
 tests/                    # discovery parsers + the guardrail regex, no network/browser needed
 ```
 
@@ -109,6 +121,8 @@ jobbot show 42                # full posting + score reasoning for job id 42
 jobbot apply 42                # open a real browser, fill it, review, confirm, submit
 jobbot batch --min-score 80 --limit 5   # do several, paced 45-180s apart, still reviewed one by one
 jobbot ledger                # what you've actually submitted, and when
+jobbot learned list           # what it's remembered so far, and how often each answer's been reused
+jobbot learned forget <id>    # delete one remembered answer (e.g. you mistyped it once)
 ```
 
 `jobbot apply`/`batch` launch a **visible** (headed) Chromium window by
@@ -117,6 +131,42 @@ default (`JOBBOT_HEADLESS=false`) using a persistent profile stored in
 asks once. Every attempt gets a full-page screenshot in
 `data/screenshots/` and a row in the `applications` table regardless of
 whether you end up submitting.
+
+## Memory: how it adapts across applications
+
+Every non-file field that ends up with a value — whether Claude filled it or
+you typed it in during review — gets captured in `learned_answers`, keyed by
+a normalized version of its question text (`jobbot/learning/normalize.py`
+strips case/punctuation/trailing "*"; `find_match` also does a fuzzy
+token-set match, so "Are you authorized to work in the US?" and "Are you
+legally authorized to work in the United States?" resolve to the same
+learned answer). The next form that asks a matching question skips the LLM
+call for it entirely and, for non-sensitive fields, fills it in directly.
+
+What does and doesn't get reused, on purpose:
+
+- **Short factual answers** (name, email, years of experience, "are you
+  willing to relocate", school, etc.) — reused automatically once learned.
+- **Sensitive fields** (work authorization, EEOC/demographic questions,
+  legal attestations — the same regex from `fill_planner.py`) — still
+  *never* auto-filled. What changes is the review table now shows "you
+  answered before: <value>" next to them, so you're not hunting for your own
+  past answer, but you still type it into the browser yourself every time.
+- **Long free text** (cover letters, "why do you want to work here",
+  textareas over ~200 characters) — never learned/reused verbatim. Reusing
+  a canned paragraph across different employers reads as spam and is
+  explicitly excluded regardless of length settings.
+
+Run `jobbot learned list` to see everything it's picked up and how many
+times each has been reused; `jobbot learned forget <id>` deletes one if it
+got captured wrong (e.g. you fat-fingered an answer once).
+
+What this does *not* do: self-heal a broken CSS selector when an ATS
+changes its DOM structure. That would need a vision-based approach (à la
+Skyvern) rather than the label-matching used here. When a fill genuinely
+breaks, it shows up as an `error` status in `jobbot ledger` — that's your
+signal to open an issue/PR against the relevant `submit/<ats>.py`, not
+something the bot patches itself.
 
 ## Guardrails, and how to loosen them safely
 
@@ -167,7 +217,8 @@ pytest
 ```
 
 Tests cover the discovery parsers (mocked HTTP via `respx`, no network), the
-lexical shortlist scorer, the `Profile` schema, and — most importantly —
-`test_fill_planner_guardrails.py`, which checks that every sensitive-topic
-form label actually trips the forced-human-review regex. If you edit that
-regex, that test is the one to watch.
+lexical shortlist scorer, the `Profile` schema, the learning store's
+normalize/fuzzy-match/upsert behavior (in-memory SQLite, no real DB touched),
+and — most importantly — `test_fill_planner_guardrails.py`, which checks
+that every sensitive-topic form label actually trips the forced-human-review
+regex. If you edit that regex, that test is the one to watch.

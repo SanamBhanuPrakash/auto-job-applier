@@ -60,45 +60,57 @@ For select/radio/combobox fields, choose the exact option text from the
 provided options list, or null if none fit. Be conservative."""
 
 
-def _fields_for_llm(fields: list[FieldSpec]) -> list[dict]:
-    return [f.to_llm_dict() for f in fields if f.field_type != "file"]
+def is_sensitive(label: str) -> bool:
+    return bool(_ALWAYS_HUMAN_RE.search(label))
 
 
 def build_fill_plan(profile: Profile, fields: list[FieldSpec], job_context: str) -> dict[int, dict]:
-    llm_fields = _fields_for_llm(fields)
-    if not llm_fields:
-        return {}
+    candidates = [f for f in fields if f.field_type != "file"]
 
-    prompt = (
-        f"Candidate profile:\n{profile.facts_json_for_llm()}\n\n"
-        f"Job context:\n{job_context}\n\n"
-        f"Form fields:\n{llm_fields}"
-    )
-    result = call_tool(
-        system=_SYSTEM,
-        user_message=prompt,
-        tool_name="record_fill_plan",
-        tool_description="Record the value (or null) and needs_human flag for every field.",
-        input_schema=_PLAN_TOOL_SCHEMA,
-    )
-
-    by_field_id = {f.field_id: f for f in fields}
     plan: dict[int, dict] = {}
-    for row in result.get("fields", []):
-        fid = row["field_id"]
-        spec = by_field_id.get(fid)
-        needs_human = bool(row.get("needs_human", True))
-        if spec and _ALWAYS_HUMAN_RE.search(spec.label):
-            needs_human = True  # non-negotiable, overrides the model
-        plan[fid] = {
-            "value": row.get("value"),
-            "needs_human": needs_human,
-            "reasoning": row.get("reasoning", ""),
-        }
+    llm_fields: list[FieldSpec] = []
+    for f in candidates:
+        if is_sensitive(f.label):
+            # Never even ask the model for these — no value it could return
+            # would be usable unsupervised, so skip the API call entirely.
+            plan[f.field_id] = {
+                "value": None,
+                "needs_human": True,
+                "reasoning": "Sensitive field (work authorization/EEOC/legal/etc.) always requires human review.",
+            }
+        else:
+            llm_fields.append(f)
+
+    if llm_fields:
+        prompt = (
+            f"Candidate profile:\n{profile.facts_json_for_llm()}\n\n"
+            f"Job context:\n{job_context}\n\n"
+            f"Form fields:\n{[f.to_llm_dict() for f in llm_fields]}"
+        )
+        result = call_tool(
+            system=_SYSTEM,
+            user_message=prompt,
+            tool_name="record_fill_plan",
+            tool_description="Record the value (or null) and needs_human flag for every field.",
+            input_schema=_PLAN_TOOL_SCHEMA,
+        )
+
+        by_field_id = {f.field_id: f for f in llm_fields}
+        for row in result.get("fields", []):
+            fid = row["field_id"]
+            spec = by_field_id.get(fid)
+            if spec is None:
+                continue
+            needs_human = bool(row.get("needs_human", True)) or is_sensitive(spec.label)  # defense in depth
+            plan[fid] = {
+                "value": row.get("value"),
+                "needs_human": needs_human,
+                "reasoning": row.get("reasoning", ""),
+            }
 
     # Any field the model didn't return an entry for defaults to needs_human.
-    for f in fields:
-        if f.field_type != "file" and f.field_id not in plan:
+    for f in candidates:
+        if f.field_id not in plan:
             plan[f.field_id] = {"value": None, "needs_human": True, "reasoning": "no model response"}
 
     return plan

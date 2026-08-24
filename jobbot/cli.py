@@ -10,7 +10,7 @@ from sqlalchemy import select
 from jobbot.config import get_settings, load_search_settings, save_profile_raw
 from jobbot.db import session_scope
 from jobbot.logging_conf import setup_logging
-from jobbot.models import Application, Job, JobScore
+from jobbot.models import Application, Job, JobScore, LearnedAnswer
 
 app = typer.Typer(add_completion=False, help="Local-first job discovery and assisted-application agent.")
 console = Console()
@@ -191,6 +191,48 @@ def ledger(limit: int = typer.Option(30)) -> None:
     for application, job in rows:
         table.add_row(str(application.created_at), application.status, job.company, job.title)
     console.print(table)
+
+
+learned_app = typer.Typer(help="Inspect/manage answers jobbot has learned from your past applications")
+app.add_typer(learned_app, name="learned")
+
+
+@learned_app.command("list")
+def learned_list(limit: int = typer.Option(50)) -> None:
+    """Show remembered answers, most-reused first."""
+    with session_scope() as session:
+        rows = session.execute(
+            select(LearnedAnswer).order_by(LearnedAnswer.times_used.desc()).limit(limit)
+        ).scalars().all()
+
+    table = Table(title="Learned answers")
+    table.add_column("id")
+    table.add_column("question")
+    table.add_column("value")
+    table.add_column("type")
+    table.add_column("sensitive")
+    table.add_column("used")
+    for r in rows:
+        value_preview = r.value if len(r.value) <= 60 else r.value[:57] + "..."
+        table.add_row(str(r.id), r.label_raw, value_preview, r.field_type, "yes" if r.sensitive else "", str(r.times_used))
+    console.print(table)
+    console.print(
+        "\nSensitive answers are shown here for reference only — they're never "
+        "auto-filled; you'll still type them each time, with the reminder shown "
+        "during review."
+    )
+
+
+@learned_app.command("forget")
+def learned_forget(answer_id: int) -> None:
+    """Delete one remembered answer, e.g. if it was captured wrong."""
+    with session_scope() as session:
+        row = session.get(LearnedAnswer, answer_id)
+        if row is None:
+            console.print(f"[red]No learned answer with id {answer_id}[/red]")
+            raise typer.Exit(1)
+        session.delete(row)
+    console.print(f"[green]Forgot learned answer {answer_id}[/green]")
 
 
 if __name__ == "__main__":

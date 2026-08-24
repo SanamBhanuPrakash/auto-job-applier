@@ -63,3 +63,25 @@ class Application(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     job: Mapped[Job] = relationship(back_populates="applications")
+
+
+class LearnedAnswer(Base):
+    """A remembered answer to a recurring application question, keyed by a
+    normalized version of its label so future postings that ask the same
+    thing in slightly different wording still match. See jobbot/learning/.
+    """
+
+    __tablename__ = "learned_answers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    label_raw: Mapped[str] = mapped_column(String(512))
+    field_type: Mapped[str] = mapped_column(String(32))
+    value: Mapped[str] = mapped_column(Text)
+    # Sensitive answers (work auth, EEOC, legal attestations, ...) are still
+    # never auto-filled — see fill_planner._ALWAYS_HUMAN_RE — this only lets
+    # the review step remind you what you answered last time.
+    sensitive: Mapped[bool] = mapped_column(default=False)
+    times_used: Mapped[int] = mapped_column(default=1)
+    last_used_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
