@@ -396,6 +396,42 @@ trust it.
    saved answers, and a `batch` run really can go end-to-end unattended
    after that one confirmation.
 
+**Why there's still a human click, even in Stage 3.** Researched this
+directly rather than assuming it: Simplify Copilot — the best-known
+browser-extension autofill tool, and the one most often held up as "how the
+good ones do it" — never submits for you either, on any tier, including its
+paid "auto apply" one. You still click Submit yourself on every single
+application; it only speeds up the filling. Reported field-matching
+accuracy on some ATS platforms (iCIMS/Taleo) runs ~40-50%, and Reddit/Blind
+threads on fully-unattended "apply while you sleep" bots describe real
+platform bans, per-company blacklisting from over-applying, and rejection
+history that follows a candidate indefinitely once an ATS has it on file —
+the exact risk this project's own design has avoided since the first
+commit. That's not a gap in this tool that a smarter model would close; a
+2025 form-filling benchmark (FormFactory, arXiv:2506.01520) found the task
+still resists even state-of-the-art multimodal LLMs. The honest reading:
+the tools that "just work" unattended don't exist yet, anywhere, including
+outside this project — what exists is faster, more reliable *filling*,
+which is a different thing than removing the final check, and is exactly
+what Stage 3 plus the fast path below already gets you as close to as is
+real.
+
+**The Simplify-style fast path.** Simplify's core autofill isn't LLM-driven
+at all — it's a fixed taxonomy of common field labels (name, email, phone,
+links, current job, school) fuzzy-matched onto a stored profile, with AI
+reserved for genuinely novel free-text questions. `jobbot/submit/
+static_answers.py` does the same thing here: before a single field goes to
+the LLM, ~15 near-universal fields (first/last/full name, email, phone,
+LinkedIn/GitHub/portfolio, current company/title, school/degree, desired
+salary, willing-to-relocate, location) are resolved directly from
+`profile.yaml` — no API call, no rate-limit exposure, and strictly more
+reliable than an LLM guess since it's a literal profile lookup, not an
+inference. Combined with `learning_store`'s remembered answers (built up
+from your own past applications) and Stage 3 above, a well-filled profile
+means an increasing share of applications end up with an empty
+`needs_human` list — those are exactly the ones `--auto-submit` sends
+through with no prompt at all.
+
 Other things baked in rather than left to a prompt:
 - Randomized pacing (`pacing_seconds_min/max` in `settings.yaml`) between
   batch applications so it doesn't look scripted.
@@ -429,7 +465,16 @@ slug. Submission is a different story: clicking "Apply" on a real posting
 goes straight to a Workday Sign In wall — confirmed live, not assumed from
 Workday's DOM-complexity reputation — meaning it needs a candidate account
 per employer tenant, the same category as Wellfound/Cutshort below, not a
-harder-but-doable DOM-scanning problem.
+harder-but-doable DOM-scanning problem. It's also worth being upfront that
+solving the login wall wouldn't be the end of it: Workday's real apply flow
+is a multi-step wizard (personal info -> experience -> voluntary
+disclosures -> review -> submit) across several page navigations, not the
+single page Greenhouse/Lever forms are. `jobbot/submit/base.py` and
+`filler.py` are built around one scan-fill-verify-submit pass; multi-step
+support would mean a per-employer-tenant login step plus a loop that
+re-scans and re-fills after each "Next," which is a materially bigger
+submission module than greenhouse.py/lever.py, not an incremental change to
+either.
 
 **SmartRecruiters was checked and ruled out for submission, not just left
 undone.** Its application-submission page

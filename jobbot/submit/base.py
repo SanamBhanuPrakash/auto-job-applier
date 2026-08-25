@@ -29,6 +29,7 @@ from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
 from jobbot.submit.review import confirm_already_closed_browser, confirm_submit, show_review
+from jobbot.submit.static_answers import resolve_static_fields
 
 log = logging.getLogger(__name__)
 
@@ -180,12 +181,27 @@ def apply_to_job(
                 if fid not in remembered_plan
             }
 
+            # Resolve the handful of near-universal fields (name, email,
+            # phone, links, current company/title, school, ...) directly
+            # from the profile before anything goes to the LLM at all — see
+            # static_answers.py for why. Never overrides a remembered answer
+            # (something you actually typed and confirmed beats a generic
+            # profile mapping) or a circuit-broken field (stay conservative
+            # about a label that's failed to auto-fill before).
+            static_plan = {
+                fid: v for fid, v in resolve_static_fields(profile, fields).items()
+                if fid not in remembered_plan and fid not in circuit_broken_plan
+            }
+
             llm_fields = [
                 f for f in fields
-                if f.field_id not in remembered_plan and f.field_id not in circuit_broken_plan
+                if f.field_id not in remembered_plan
+                and f.field_id not in circuit_broken_plan
+                and f.field_id not in static_plan
             ]
 
-            plan = build_fill_plan(profile, llm_fields, job_context)
+            plan = dict(static_plan)
+            plan.update(build_fill_plan(profile, llm_fields, job_context))
             plan.update(remembered_plan)
             plan.update(circuit_broken_plan)
 
