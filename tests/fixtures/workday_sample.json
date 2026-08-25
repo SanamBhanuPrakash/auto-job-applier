@@ -1,0 +1,19 @@
+{
+  "total": 2,
+  "jobPostings": [
+    {
+      "title": "Sr. AI Engineer",
+      "locationsText": "Bengaluru, India",
+      "postedOn": "Posted 3 Days Ago",
+      "externalPath": "/job/Bengaluru-India/Sr-AI-Engineer_JR1262",
+      "bulletFields": ["JR1262"]
+    },
+    {
+      "title": "Finance Assistant",
+      "locationsText": "Brazil - Remote",
+      "postedOn": "Posted 30+ Days Ago",
+      "externalPath": "/job/Brazil---Remote/Finance-Assistant_JR1468",
+      "bulletFields": ["JR1468"]
+    }
+  ]
+}

@@ -8,7 +8,9 @@ from sqlalchemy import select
 
 from jobbot.config import load_companies, load_search_settings
 from jobbot.db import session_scope
-from jobbot.discovery import adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs
+from jobbot.discovery import (
+    adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs, workday,
+)
 from jobbot.discovery.base import NormalizedJob
 from jobbot.discovery.recency import filter_recent
 from jobbot.models import Job
@@ -21,6 +23,10 @@ _ATS_CONNECTORS = {
     "ashby": ashby.fetch_jobs,
     "smartrecruiters": smartrecruiters.fetch_jobs,
     "recruitee": recruitee.fetch_jobs,
+    # workday's "slug" is a full careers URL, not a bare company slug like
+    # the others — fetch_jobs still takes a single string either way, so no
+    # special-casing needed here. See discovery/workday.py.
+    "workday": workday.fetch_jobs,
 }
 
 

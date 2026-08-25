@@ -6,6 +6,7 @@
 #   https://boards.greenhouse.io/stripe          -> greenhouse slug "stripe"
 #   https://jobs.lever.co/netflix                -> lever slug "netflix"
 #   https://jobs.ashbyhq.com/linear              -> ashby slug "linear"
+#   https://acme.wd5.myworkdayjobs.com/en-US/acme_careers -> workday: paste the FULL url
 #
 # Every slug below was checked live (not guessed) against each API right
 # before this file was written — see the "India-hiring" note per section.
@@ -84,12 +85,22 @@ ashby:
   - perplexity
   - runway
 
-# Discovery-only for both of these — see README "Extending to more ATSes /
-# sites" for why submission isn't implemented (SmartRecruiters' apply flow
-# is DataDome-protected).
+# Discovery-only for all three below — see README "Extending to more ATSes
+# / sites" for why submission isn't implemented for each (SmartRecruiters'
+# apply flow is DataDome-protected; Workday's needs a candidate account per
+# employer — clicking Apply on a real posting goes straight to a Sign In
+# wall, confirmed live, same category as Wellfound/Cutshort).
 smartrecruiters:
   - Visa
   - Bosch
+
+# Paste the full careers URL, not a bare slug — see the header note above.
+# All four confirmed live (POST .../wday/cxs/<tenant>/<site>/jobs, no auth).
+workday:
+  - https://automationanywhere.wd5.myworkdayjobs.com/en-US/automationanywherejobs
+  - https://workday.wd5.myworkdayjobs.com/Workday
+  - https://bdx.wd1.myworkdayjobs.com/EXTERNAL_CAREER_SITE_INDIA # BD, explicitly India-focused site
+  - https://ouryahoo.wd5.myworkdayjobs.com/careers
 
 recruitee:
   []

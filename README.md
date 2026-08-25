@@ -17,11 +17,11 @@ part that gets people banned.
 ## What this does
 
 1. **Discover** — polls public, keyless JSON APIs (Greenhouse, Lever, Ashby,
-   SmartRecruiters, Recruitee, plus Adzuna/USAJobs/RemoteOK/Remotive) for job
-   postings, keeps only postings from roughly the last 1-2 days (configurable;
-   some sources list postings that are actually years old), and stores them
-   in a local SQLite DB, deduped so re-running never creates duplicates. No
-   scraping, no login.
+   SmartRecruiters, Recruitee, Workday, plus Adzuna/USAJobs/RemoteOK/Remotive)
+   for job postings, keeps only postings from roughly the last 1-2 days
+   (configurable; some sources list postings that are actually years old),
+   and stores them in a local SQLite DB, deduped so re-running never creates
+   duplicates. No scraping, no login.
 2. **Match** — a cheap local keyword/location filter shortlists postings,
    then the LLM reranks the shortlist against your parsed resume/profile and
    gives each a 0–100 fit score with reasoning.
@@ -74,7 +74,7 @@ part that gets people banned.
 config/                  # your personal, gitignored config (copy the .example files)
 jobbot/
   discovery/              # one module per source, all normalize to NormalizedJob
-    greenhouse.py lever.py ashby.py smartrecruiters.py recruitee.py
+    greenhouse.py lever.py ashby.py smartrecruiters.py recruitee.py workday.py
     adzuna.py usajobs.py remoteok.py remotive.py
     recency.py             # parses each source's posted_at format, filters to recent postings
     aggregate.py          # fans out, dedupes by (source, external_id), applies recency filter, persists
@@ -405,15 +405,26 @@ Other things baked in rather than left to a prompt:
 
 ## Extending to more ATSes / sites
 
-`Ashby`, `SmartRecruiters`, and `Recruitee` are already wired up for
-*discovery* (see `config/companies.example.yaml`) but not for *submission* —
-`job.ats` is left empty for them, so `jobbot apply` will refuse with "no
-submission handler" rather than guess. To add one, look at
+`Ashby`, `SmartRecruiters`, `Recruitee`, and `Workday` are already wired up
+for *discovery* (see `config/companies.example.yaml`) but not for
+*submission* — `job.ats` is left empty for them, so `jobbot apply` will
+refuse with "no submission handler" rather than guess. To add one, look at
 `jobbot/submit/lever.py` as the minimal template (just a form-ready wait and
 a submit-button selector — the generic scanner/filler handle the rest) and
 `jobbot/submit/greenhouse.py` for a platform with non-native dropdowns.
-Workday is explicitly out of scope here — the research this was built from
-flags it as needing a vision-LLM approach, not a static-selector one.
+
+**Workday: discovery works well, submission doesn't, and the reason isn't
+what you'd guess.** Its job-listing API (`POST .../wday/cxs/<tenant>/<site>/
+jobs`) needs no auth at all and was confirmed live across four unrelated
+employers (Automation Anywhere, Workday itself, BD's India-specific career
+site, Yahoo) — `jobbot/discovery/workday.py` uses it, and
+`config/companies.example.yaml`'s `workday:` list takes a full careers URL
+per employer since (unlike Greenhouse/Lever) there's no single guessable
+slug. Submission is a different story: clicking "Apply" on a real posting
+goes straight to a Workday Sign In wall — confirmed live, not assumed from
+Workday's DOM-complexity reputation — meaning it needs a candidate account
+per employer tenant, the same category as Wellfound/Cutshort below, not a
+harder-but-doable DOM-scanning problem.
 
 **SmartRecruiters was checked and ruled out for submission, not just left
 undone.** Its application-submission page
