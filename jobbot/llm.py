@@ -41,19 +41,24 @@ from jobbot.config import get_settings
 
 log = logging.getLogger(__name__)
 
-_client = None
-_client_provider: str | None = None
+_clients: dict[str, object] = {}
 
 MAX_RATE_LIMIT_RETRIES = 5
 
+# Providers whose free tier can be used as an automatic fallback when the
+# configured one hits its daily quota (see call_tool below). "anthropic" is
+# deliberately excluded — it's pay-as-you-go, and silently routing a run
+# onto a paid provider without explicit consent just because a free one ran
+# dry is not a call this code gets to make on the user's behalf.
+_FREE_FALLBACK_ORDER = ["groq", "gemini"]
 
-def _get_client():
-    global _client, _client_provider
+
+def _get_client(provider: str | None = None):
     settings = get_settings()
-    provider = settings.llm_provider
+    provider = provider or settings.llm_provider
 
-    if _client is not None and _client_provider == provider:
-        return _client
+    if provider in _clients:
+        return _clients[provider]
 
     if provider == "groq":
         if not settings.groq_api_key:
@@ -63,7 +68,7 @@ def _get_client():
             )
         import groq
 
-        _client = groq.Groq(api_key=settings.groq_api_key)
+        client = groq.Groq(api_key=settings.groq_api_key)
     elif provider == "gemini":
         if not settings.gemini_api_key:
             raise RuntimeError(
@@ -73,7 +78,7 @@ def _get_client():
             )
         from google import genai
 
-        _client = genai.Client(api_key=settings.gemini_api_key)
+        client = genai.Client(api_key=settings.gemini_api_key)
     elif provider == "anthropic":
         if not settings.anthropic_api_key:
             raise RuntimeError(
@@ -84,12 +89,16 @@ def _get_client():
             )
         import anthropic
 
-        _client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r}; expected 'groq', 'gemini', or 'anthropic'.")
 
-    _client_provider = provider
-    return _client
+    _clients[provider] = client
+    return client
+
+
+def _provider_has_key(settings, provider: str) -> bool:
+    return bool(getattr(settings, f"{provider}_api_key", ""))
 
 
 def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -257,6 +266,9 @@ def _call_anthropic(client, *, system, user_message, tool_name, tool_description
     raise RuntimeError(f"Model did not call {tool_name}; got: {response.content!r}")
 
 
+_HANDLERS = {"groq": _call_groq, "gemini": _call_gemini, "anthropic": _call_anthropic}
+
+
 def call_tool(
     *,
     system: str,
@@ -266,12 +278,36 @@ def call_tool(
     input_schema: dict,
     max_tokens: int = 4096,
 ) -> dict:
-    """Send one message, force the model to call `tool_name`, return its input dict."""
-    settings = get_settings()
-    client = _get_client()
+    """Send one message, force the model to call `tool_name`, return its input dict.
 
-    handler = {"groq": _call_groq, "gemini": _call_gemini, "anthropic": _call_anthropic}[settings.llm_provider]
-    return handler(
-        client, system=system, user_message=user_message, tool_name=tool_name,
-        tool_description=tool_description, input_schema=input_schema, max_tokens=max_tokens,
-    )
+    If LLM_PROVIDER hits its free-tier *daily* quota (confirmed live: Groq's
+    openai/gpt-oss-20b caps at 200k tokens/day, independent of its per-minute
+    limit), and another free provider has a key configured too — e.g. both
+    GROQ_API_KEY and GEMINI_API_KEY are set — this automatically retries the
+    same call on that provider instead of stopping a long scoring run cold
+    for the rest of the day. Two independent free daily budgets are strictly
+    more than one. Never falls back to "anthropic" (see _FREE_FALLBACK_ORDER).
+    """
+    settings = get_settings()
+    primary = settings.llm_provider
+    candidates = [primary] + [
+        p for p in _FREE_FALLBACK_ORDER if p != primary and _provider_has_key(settings, p)
+    ]
+
+    last_quota_exc: DailyQuotaExceeded | None = None
+    for provider in candidates:
+        client = _get_client(provider)
+        handler = _HANDLERS[provider]
+        try:
+            result = handler(
+                client, system=system, user_message=user_message, tool_name=tool_name,
+                tool_description=tool_description, input_schema=input_schema, max_tokens=max_tokens,
+            )
+        except DailyQuotaExceeded as exc:
+            last_quota_exc = exc
+            log.warning("Provider %r hit its daily quota; trying the next configured provider...", provider)
+            continue
+        if provider != primary:
+            log.warning("Fell back from LLM_PROVIDER=%r to %r after a daily quota limit.", primary, provider)
+        return result
+    raise last_quota_exc

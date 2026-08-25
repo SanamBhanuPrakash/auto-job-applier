@@ -11,11 +11,9 @@ from jobbot.config import get_settings
 
 @pytest.fixture(autouse=True)
 def _reset_llm_client_cache():
-    llm_module._client = None
-    llm_module._client_provider = None
+    llm_module._clients.clear()
     yield
-    llm_module._client = None
-    llm_module._client_provider = None
+    llm_module._clients.clear()
     get_settings.cache_clear()
 
 
@@ -237,3 +235,74 @@ def test_daily_quota_error_is_a_runtime_error_subclass_for_precise_catching(monk
 
     with pytest.raises(llm_module.DailyQuotaExceeded):
         llm_module._call_with_rate_limit_retry(always_daily_quota)
+
+
+def test_call_tool_falls_back_to_gemini_when_groq_hits_daily_quota(monkeypatch):
+    """Real scenario hit live: openai/gpt-oss-20b's 200k/day Groq budget ran
+    out partway through a 1200-job scoring run. With a GEMINI_API_KEY also
+    configured, call_tool should retry the same request on Gemini instead
+    of stopping the whole run for the rest of the day."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm_module, "_get_client", lambda provider=None: provider or "groq")
+
+    calls = []
+
+    def fake_groq(client, **_kwargs):
+        calls.append("groq")
+        raise llm_module.DailyQuotaExceeded("groq daily quota hit")
+
+    def fake_gemini(client, **_kwargs):
+        calls.append("gemini")
+        return {"ok": True}
+
+    monkeypatch.setattr(llm_module, "_HANDLERS", {"groq": fake_groq, "gemini": fake_gemini, "anthropic": fake_gemini})
+
+    result = llm_module.call_tool(system="sys", user_message="msg", tool_name="t", tool_description="d", input_schema={})
+
+    assert result == {"ok": True}
+    assert calls == ["groq", "gemini"]
+
+
+def test_call_tool_raises_daily_quota_exceeded_when_every_free_provider_is_exhausted(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-gemini-key")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm_module, "_get_client", lambda provider=None: provider or "groq")
+
+    def always_quota(client, **_kwargs):
+        raise llm_module.DailyQuotaExceeded("quota hit")
+
+    monkeypatch.setattr(llm_module, "_HANDLERS", {"groq": always_quota, "gemini": always_quota, "anthropic": always_quota})
+
+    with pytest.raises(llm_module.DailyQuotaExceeded):
+        llm_module.call_tool(system="sys", user_message="msg", tool_name="t", tool_description="d", input_schema={})
+
+
+def test_call_tool_never_auto_falls_back_to_paid_anthropic_provider(monkeypatch):
+    """Anthropic is pay-as-you-go — even if ANTHROPIC_API_KEY happens to be
+    set, running out of a free provider's daily quota must never silently
+    start spending the user's money without explicit consent."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key")
+    get_settings.cache_clear()
+    monkeypatch.setattr(llm_module, "_get_client", lambda provider=None: provider or "groq")
+
+    def always_quota(client, **_kwargs):
+        raise llm_module.DailyQuotaExceeded("quota hit")
+
+    def must_not_be_called(client, **_kwargs):
+        raise AssertionError("must never automatically fall back to a paid provider")
+
+    monkeypatch.setattr(
+        llm_module, "_HANDLERS",
+        {"groq": always_quota, "gemini": must_not_be_called, "anthropic": must_not_be_called},
+    )
+
+    with pytest.raises(llm_module.DailyQuotaExceeded):
+        llm_module.call_tool(system="sys", user_message="msg", tool_name="t", tool_description="d", input_schema={})
