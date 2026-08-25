@@ -70,7 +70,9 @@ jobbot/
     score.py                # Claude reranks the shortlist, writes JobScore
   submit/
     form_scan.py           # generic DOM scanner (injects data-jobbot-id, handles
-                            # native selects, react-aria comboboxes, radio groups)
+                            # native selects, react-aria comboboxes, radio groups) +
+                            # find_target_frame(), which follows an <iframe> embed
+                            # when the employer's careers page has no top-level <form>
     values.py                # reads a field's current human-readable value (shared by verify + learning capture)
     fill_planner.py         # Claude fill plan + the hard-coded sensitive-field guardrail
     filler.py               # applies the plan, verifies, retries once on empty
@@ -219,6 +221,22 @@ pytest
 Tests cover the discovery parsers (mocked HTTP via `respx`, no network), the
 lexical shortlist scorer, the `Profile` schema, the learning store's
 normalize/fuzzy-match/upsert behavior (in-memory SQLite, no real DB touched),
-and — most importantly — `test_fill_planner_guardrails.py`, which checks
-that every sensitive-topic form label actually trips the forced-human-review
-regex. If you edit that regex, that test is the one to watch.
+`test_fill_planner_guardrails.py` (every sensitive-topic form label trips the
+forced-human-review regex), and `test_browser_form_handling.py`, which is
+the one to trust most: it drives a real headless Chromium against local
+HTML fixtures (`tests/fixtures/application_form.html` and
+`careers_page_with_iframe.html`) through the actual scan → fill → verify →
+capture pipeline `jobbot apply` uses — no mocks, no network, no LLM call
+needed since the fill plan is hand-built for the test. It requires
+`playwright install chromium` and skips itself (rather than failing) if
+that hasn't been run.
+
+That browser test suite is also what caught the two real bugs found while
+building this: a `boards.greenhouse.io` vs. iframe-embedded-on-the-employer's-
+own-domain mismatch (most Greenhouse customers — Stripe, Airbnb, Coinbase,
+Pinterest, Instacart, Asana — embed the form on their own branded careers
+page rather than serving it at Greenhouse's own hosted URL; `find_target_frame()`
+in `form_scan.py` now follows that iframe when there's no top-level `<form>`),
+and a `token_set_ratio` vs. plain `ratio` gap in the learning matcher's fuzzy
+threshold that let a real reworded work-authorization question fall through
+unmatched.

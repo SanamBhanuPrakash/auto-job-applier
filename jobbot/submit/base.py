@@ -23,7 +23,7 @@ from jobbot.submit import greenhouse, lever
 from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
-from jobbot.submit.form_scan import scan_form
+from jobbot.submit.form_scan import find_target_frame, scan_form
 from jobbot.submit.review import confirm_submit, show_review
 
 log = logging.getLogger(__name__)
@@ -62,9 +62,13 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
         page = context.new_page()
         try:
             page.goto(job.url, wait_until="domcontentloaded", timeout=30000)
-            ats_module.wait_for_form(page)
+            # Most hosted-apply pages have the form at the top level; some
+            # employers embed it in an iframe on their own branded careers
+            # page instead — this finds whichever one actually has it.
+            form_ctx = find_target_frame(page, ats_module.ATS_HINT)
+            ats_module.settle(page)
 
-            fields = scan_form(page)
+            fields = scan_form(form_ctx)
             job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:2000]}"
 
             # Reuse answers this field's question has gotten before. Sensitive
@@ -93,9 +97,9 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             plan.update(remembered_plan)
 
             if settings.jobbot_resume_path.exists():
-                upload_resume(page, fields, settings.jobbot_resume_path)
+                upload_resume(form_ctx, fields, settings.jobbot_resume_path)
 
-            needs_human = apply_fill_plan(page, fields, plan)
+            needs_human = apply_fill_plan(form_ctx, fields, plan)
 
             screenshot_path = settings.data_dir / "screenshots" / f"application_{app_id}.png"
             page.screenshot(path=str(screenshot_path), full_page=True)
@@ -117,13 +121,13 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             # away, so the next application to ask the same question already
             # knows the answer.
             with session_scope() as session:
-                learning_store.capture_from_page(session, page, fields)
+                learning_store.capture_from_page(session, form_ctx, fields)
 
             status = "skipped"
             error = ""
             if should_submit:
                 try:
-                    ats_module.click_submit(page)
+                    ats_module.click_submit(form_ctx)
                     page.wait_for_timeout(2000)
                     status = "submitted"
                 except Exception as exc:  # noqa: BLE001

@@ -8,9 +8,16 @@ maps to several physical <input> elements.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field as dc_field
 
-from playwright.sync_api import Locator, Page
+from playwright.sync_api import Frame, Locator, Page
+
+# Most hosted-apply pages render the form directly; some employers embed it
+# via an <iframe> on their own branded careers page instead. Everything
+# downstream (scan_form, locate, filler.py, values.py) works against either
+# a Page or a Frame — both implement .locator()/.evaluate() identically.
+FrameLike = Page | Frame
 
 _SCAN_JS = """
 () => {
@@ -125,7 +132,7 @@ class FieldSpec:
         }
 
 
-def scan_form(page: Page) -> list[FieldSpec]:
+def scan_form(page: FrameLike) -> list[FieldSpec]:
     raw = page.evaluate(_SCAN_JS)
     return [
         FieldSpec(
@@ -140,7 +147,42 @@ def scan_form(page: Page) -> list[FieldSpec]:
     ]
 
 
-def locate(page: Page, spec: FieldSpec) -> Locator:
+def locate(page: FrameLike, spec: FieldSpec) -> Locator:
     if spec.field_type == "radio":
         return page.locator(f'input[type="radio"][name="{spec.group_name}"]')
     return page.locator(f'[data-jobbot-id="{spec.field_id}"]')
+
+
+def find_target_frame(page: Page, ats_hint: str = "", timeout_ms: int = 15000) -> FrameLike:
+    """Poll the page (which may still be hydrating a JS-rendered form) for a
+    <form>, either at the top level or inside an iframe. If the employer's
+    own careers page embeds the ATS form in an iframe (common — see
+    module docstring), returns that iframe's Frame instead of the Page so
+    every downstream call (scan_form, fill, submit) operates on wherever
+    the form actually lives.
+
+    Raises TimeoutError if no form shows up anywhere within timeout_ms —
+    that's a real "this employer's flow isn't a plain form" signal, not
+    something to guess past.
+    """
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        if page.locator("form").count() > 0:
+            return page
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            if ats_hint and ats_hint not in (frame.url or ""):
+                continue
+            try:
+                if frame.locator("form").count() > 0:
+                    return frame
+            except Exception:
+                continue
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"No <form> found on the page or in a matching iframe within {timeout_ms}ms "
+                f"(looked for an iframe URL containing {ats_hint!r}). This employer's apply "
+                f"flow likely isn't a plain hosted form the generic scanner can handle."
+            )
+        page.wait_for_timeout(300)

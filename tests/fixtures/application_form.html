@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Fake Application Form</title></head>
+<body>
+<form id="application-form">
+  <div class="field">
+    <label for="first_name">First Name*</label>
+    <input type="text" id="first_name" name="first_name" required>
+  </div>
+  <div class="field">
+    <label for="last_name">Last Name*</label>
+    <input type="text" id="last_name" name="last_name" required>
+  </div>
+  <div class="field">
+    <label for="email">Email*</label>
+    <input type="email" id="email" name="email" required>
+  </div>
+  <div class="field">
+    <label for="phone">Phone</label>
+    <input type="tel" id="phone" name="phone">
+  </div>
+  <div class="field">
+    <label for="resume">Resume/CV*</label>
+    <input type="file" id="resume" name="resume" required>
+  </div>
+  <div class="field">
+    <label for="cover_letter">Cover Letter</label>
+    <textarea id="cover_letter" name="cover_letter"></textarea>
+  </div>
+  <div class="field">
+    <label for="how_heard">How did you hear about us?</label>
+    <select id="how_heard" name="how_heard">
+      <option value="">-- Select --</option>
+      <option value="li">LinkedIn</option>
+      <option value="ref">Referral</option>
+      <option value="other">Other</option>
+    </select>
+  </div>
+
+  <!-- react-aria style combobox, like Greenhouse's newer boards -->
+  <div class="field">
+    <label id="school-label">School</label>
+    <input type="text" role="combobox" aria-labelledby="school-label" id="school-combobox" autocomplete="off">
+    <ul id="school-listbox" style="display:none; list-style:none; padding:0;">
+      <li role="option">State University</li>
+      <li role="option">Tech Institute</li>
+      <li role="option">Community College</li>
+    </ul>
+  </div>
+
+  <fieldset>
+    <legend>Are you legally authorized to work in the United States? *</legend>
+    <label><input type="radio" name="work_auth" value="yes"> Yes</label>
+    <label><input type="radio" name="work_auth" value="no"> No</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Will you now or in the future require visa sponsorship?</legend>
+    <label><input type="radio" name="sponsorship" value="yes"> Yes</label>
+    <label><input type="radio" name="sponsorship" value="no"> No</label>
+  </fieldset>
+
+  <div class="field">
+    <label>
+      <input type="checkbox" id="terms" name="terms">
+      I certify that the information provided is true and accurate.
+    </label>
+  </div>
+
+  <button id="submit_app" type="submit">Submit Application</button>
+</form>
+
+<script>
+  // Minimal react-aria-combobox stand-in: click to open, filter as you type,
+  // click an option to select it and close the list — same interaction
+  // contract jobbot/submit/filler.py's combobox branch drives.
+  const input = document.getElementById('school-combobox');
+  const listbox = document.getElementById('school-listbox');
+  const options = Array.from(listbox.querySelectorAll('[role="option"]'));
+
+  function openList() { listbox.style.display = 'block'; }
+  input.addEventListener('click', openList);
+  input.addEventListener('input', () => {
+    openList();
+    const q = input.value.toLowerCase();
+    options.forEach(o => {
+      o.style.display = o.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+  options.forEach(o => {
+    o.addEventListener('click', () => {
+      input.value = o.textContent;
+      listbox.style.display = 'none';
+    });
+  });
+
+  document.getElementById('application-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    document.title = 'SUBMITTED';
+  });
+</script>
+</body>
+</html>

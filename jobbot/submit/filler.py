@@ -6,15 +6,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from playwright.sync_api import Page
-
-from jobbot.submit.form_scan import FieldSpec, locate
+from jobbot.submit.form_scan import FieldSpec, FrameLike, locate
 from jobbot.submit.values import RADIO_OPTION_LABEL_JS, read_field_value
 
 log = logging.getLogger(__name__)
 
 
-def upload_resume(page: Page, fields: list[FieldSpec], resume_path: Path) -> bool:
+def upload_resume(page: FrameLike, fields: list[FieldSpec], resume_path: Path) -> bool:
     file_fields = [f for f in fields if f.field_type == "file"]
     if not file_fields:
         return False
@@ -29,7 +27,7 @@ def re_search_resume(label: str) -> bool:
     return "resume" in label or "cv" in label
 
 
-def apply_field(page: Page, spec: FieldSpec, value: str) -> None:
+def apply_field(page: FrameLike, spec: FieldSpec, value: str) -> None:
     loc = locate(page, spec)
 
     if spec.field_type in ("text", "email", "tel", "url", "number", "textarea"):
@@ -75,7 +73,7 @@ def apply_field(page: Page, spec: FieldSpec, value: str) -> None:
         log.warning("Unhandled field type %r for %r; skipping", spec.field_type, spec.label)
 
 
-def apply_fill_plan(page: Page, fields: list[FieldSpec], plan: dict[int, dict]) -> list[FieldSpec]:
+def apply_fill_plan(page: FrameLike, fields: list[FieldSpec], plan: dict[int, dict]) -> list[FieldSpec]:
     """Fills every field NOT flagged needs_human, verifies each landed, and
     retries once on an empty result before giving up. Returns the fields
     that still need the human's attention (flagged, empty value, or a fill

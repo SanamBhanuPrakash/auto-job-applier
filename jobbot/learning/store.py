@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from jobbot.learning.normalize import normalize_label
 from jobbot.models import LearnedAnswer
-from jobbot.submit.form_scan import FieldSpec
+from jobbot.submit.form_scan import FieldSpec, FrameLike
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def upsert(session: Session, label: str, field_type: str, value: str, sensitive:
     return row
 
 
-def capture_from_page(session: Session, page, fields: list[FieldSpec]) -> int:
+def capture_from_page(session: Session, page: FrameLike, fields: list[FieldSpec]) -> int:
     """Reads whatever ended up in each field (auto-filled or typed by the
     human) right before submit and remembers anything eligible. Called
     regardless of whether the application is actually submitted, so even a
