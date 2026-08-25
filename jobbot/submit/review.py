@@ -57,3 +57,21 @@ def confirm_submit(job: Job) -> bool:
         f"anything else to skip: "
     )
     return answer.strip().lower() == "yes"
+
+
+def confirm_already_closed_browser(job: Job) -> bool:
+    """The browser window for this application closed on its own before we
+    got to click Submit — most likely because you clicked the real Submit
+    button on the page yourself and then closed the window, which is a
+    completely normal thing to do during the manual-review step. Ask
+    directly instead of guessing (a wrong guess either way is bad: silently
+    recording "submitted" for something that never went through is worse
+    than the truth, and silently recording "error"/"skipped" for something
+    you actually submitted means the next `apply-all` run retries it and
+    opens yet another browser window for an already-done job)."""
+    console.print(
+        f"\n[yellow]The browser window for [bold]{job.title} @ {job.company}[/bold] closed on its own "
+        f"before I could click Submit — most likely because you already clicked it yourself on the page.[/yellow]"
+    )
+    answer = console.input("Did you already submit that application yourself? Type exactly 'yes' if so, anything else to mark it skipped: ")
+    return answer.strip().lower() == "yes"

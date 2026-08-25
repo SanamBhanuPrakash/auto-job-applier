@@ -36,6 +36,30 @@ def re_search_resume(label: str) -> bool:
 _ACTION_TIMEOUT_MS = 5000
 
 
+def _find_combobox_option(page: FrameLike, combobox_loc, value: str):
+    """The option list for an ARIA combobox can render anywhere in the DOM —
+    react-aria/Radix-style widgets commonly portal their popup to
+    document.body rather than nesting it under the input. A plain page-wide
+    `[role="option"]` search therefore isn't actually scoped to THIS
+    combobox — confirmed live: a "What is your current country of
+    residence?" combobox typed "India" and the click landed on an unrelated
+    phone-number country-code picker elsewhere on the same form (also a
+    role="option" list, also containing country names), which isn't visible
+    for that click and just times out.
+
+    The ARIA combobox pattern requires the input to name its own listbox via
+    aria-controls (sometimes aria-owns), so prefer scoping to that specific
+    id when the widget exposes one; only fall back to the unscoped
+    page-wide search for widgets that don't.
+    """
+    controls_id = combobox_loc.get_attribute("aria-controls") or combobox_loc.get_attribute("aria-owns")
+    if controls_id:
+        scoped = page.locator(f'[id="{controls_id}"] [role="option"]', has_text=value)
+        if scoped.count() > 0:
+            return scoped.first
+    return page.locator('[role="option"]', has_text=value).first
+
+
 def apply_field(page: FrameLike, spec: FieldSpec, value: str) -> None:
     loc = locate(page, spec)
 
@@ -72,7 +96,7 @@ def apply_field(page: FrameLike, spec: FieldSpec, value: str) -> None:
         loc.click(timeout=_ACTION_TIMEOUT_MS)
         loc.fill(value, timeout=_ACTION_TIMEOUT_MS)
         page.wait_for_timeout(300)  # let the async option list render
-        option = page.locator('[role="option"]', has_text=value).first
+        option = _find_combobox_option(page, loc, value)
         if option.count() > 0:
             option.click(timeout=_ACTION_TIMEOUT_MS)
         else:

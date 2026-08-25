@@ -77,8 +77,15 @@ def _get_client(provider: str | None = None):
                 "https://aistudio.google.com/apikey and add it to .env."
             )
         from google import genai
+        from google.genai import types
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+        # Confirmed live: with no timeout set, a single dropped/reset TCP
+        # connection to Google's API left a call hanging indefinitely
+        # (eventually surfaced a raw WinError 10053 after several minutes)
+        # instead of failing fast so the retry/fallback logic in
+        # call_tool() could act on it. 60s is generous for a single
+        # tool-call request of this size.
+        client = genai.Client(api_key=settings.gemini_api_key, http_options=types.HttpOptions(timeout=60000))
     elif provider == "anthropic":
         if not settings.anthropic_api_key:
             raise RuntimeError(

@@ -28,7 +28,7 @@ from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
-from jobbot.submit.review import confirm_submit, show_review
+from jobbot.submit.review import confirm_already_closed_browser, confirm_submit, show_review
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +58,42 @@ def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
             job.matched_profile_tag,
         )
     return Profile.model_validate(load_profile_raw()), settings.jobbot_resume_path
+
+
+def _looks_like_closed_target(exc: Exception) -> bool:
+    return "has been closed" in str(exc) or "Target closed" in str(exc)
+
+
+def _resolve_submit_status(page, form_ctx, ats_module, job: Job, *, auto_submit: bool) -> tuple[str, str]:
+    """Attempts the actual submit click and decides the outcome, including
+    the case where the browser is already gone by the time we get here.
+
+    Real failure mode hit live: the review step leaves the browser open so
+    you can fill remaining fields and click the real Submit button
+    yourself if you'd rather — if you then close the window, by the time
+    this runs `page.is_closed()` is already True, or the click raises
+    "Target page, context or browser has been closed." Blindly recording
+    that as status="error" left the job stuck there forever, and
+    `apply-all` retries every non-"submitted" job every run — so it kept
+    reopening a browser for a job you'd already applied to. In the
+    interactive (non-auto_submit) case, ask what actually happened instead
+    of guessing either way. Skipped for auto_submit: there's no one there
+    to answer, so it falls back to the old crash-safe "error" behavior.
+    """
+    if page.is_closed():
+        if auto_submit:
+            return "error", "Browser window closed before Submit could be clicked."
+        return ("submitted", "") if confirm_already_closed_browser(job) else ("skipped", "")
+
+    try:
+        ats_module.click_submit(form_ctx)
+        page.wait_for_timeout(2000)
+        return "submitted", ""
+    except Exception as exc:  # noqa: BLE001
+        if not auto_submit and _looks_like_closed_target(exc):
+            return ("submitted", "") if confirm_already_closed_browser(job) else ("skipped", "")
+        log.exception("Submit click failed for job %d", job.id)
+        return "error", str(exc)
 
 
 def apply_to_job(
@@ -189,23 +225,17 @@ def apply_to_job(
             # Capture whatever ended up in the form (auto-filled or typed by
             # you) before the submit click potentially navigates the page
             # away, so the next application to ask the same question already
-            # knows the answer.
-            with session_scope() as session:
-                learning_store.capture_from_page(session, form_ctx, fields)
+            # knows the answer. Skipped if the browser's already gone —
+            # nothing to read, and reading would just raise the same way
+            # click_submit below is guarded against.
+            if not page.is_closed():
+                with session_scope() as session:
+                    learning_store.capture_from_page(session, form_ctx, fields)
 
-            status = "skipped"
-            error = ""
             if should_submit:
-                try:
-                    ats_module.click_submit(form_ctx)
-                    page.wait_for_timeout(2000)
-                    status = "submitted"
-                except Exception as exc:  # noqa: BLE001
-                    status = "error"
-                    error = str(exc)
-                    log.exception("Submit click failed for job %d", job.id)
+                status, error = _resolve_submit_status(page, form_ctx, ats_module, job, auto_submit=auto_submit)
             else:
-                status = "filled_pending_review"
+                status, error = "filled_pending_review", ""
 
             with session_scope() as session:
                 app = session.get(Application, app_id)

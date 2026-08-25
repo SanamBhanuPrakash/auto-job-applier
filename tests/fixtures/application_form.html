@@ -37,10 +37,23 @@
     </select>
   </div>
 
+  <!-- Decoy: an unrelated, currently-closed widget elsewhere on the page
+       that also uses the role="option" pattern and happens to contain
+       overlapping option text — mirrors a real intl-tel-input phone
+       country-code picker sitting next to an unrelated "country of
+       residence" combobox on a live GitLab/Greenhouse form (confirmed
+       live: typing "India" there matched an option in the phone widget
+       instead, which isn't visible and just times out). Placed before the
+       real School listbox in the DOM so an unscoped, page-wide
+       `[role="option"]` search's `.first` would find this one first. -->
+  <ul id="decoy-listbox" style="display:none; list-style:none; padding:0;">
+    <li role="option">Tech Institute Annex</li>
+  </ul>
+
   <!-- react-aria style combobox, like Greenhouse's newer boards -->
   <div class="field">
     <label id="school-label">School</label>
-    <input type="text" role="combobox" aria-labelledby="school-label" id="school-combobox" autocomplete="off">
+    <input type="text" role="combobox" aria-labelledby="school-label" aria-controls="school-listbox" id="school-combobox" autocomplete="off">
     <ul id="school-listbox" style="display:none; list-style:none; padding:0;">
       <li role="option">State University</li>
       <li role="option">Tech Institute</li>
