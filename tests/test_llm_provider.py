@@ -198,3 +198,42 @@ def test_non_rate_limit_error_is_not_retried(monkeypatch):
         llm_module._call_with_rate_limit_retry(always_fails)
 
     assert calls["n"] == 1
+
+
+def test_malformed_tool_call_json_is_retried_then_succeeds(monkeypatch):
+    """Real error hit live scoring a 1200-job batch: Groq's server-side JSON
+    parser choked on a stray quote the model generated
+    (`"job_id":2523","score":30`) and rejected the request with 400
+    'tool_use_failed'. A fresh generation is usually well-formed, so this
+    should retry (not crash the whole scoring run) and succeed."""
+    calls = {"n": 0}
+
+    class FakeBadRequestError(Exception):
+        pass
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise FakeBadRequestError(
+                "Error code: 400 - {'error': {'message': 'Failed to parse tool call arguments as "
+                "JSON', 'type': 'invalid_request_error', 'code': 'tool_use_failed'}}"
+            )
+        return "ok"
+
+    monkeypatch.setattr(llm_module.time, "sleep", lambda _seconds: None)
+    result = llm_module._call_with_rate_limit_retry(flaky)
+
+    assert result == "ok"
+    assert calls["n"] == 2
+
+
+def test_daily_quota_error_is_a_runtime_error_subclass_for_precise_catching(monkeypatch):
+    """score.py needs to distinguish 'stop the whole run, quota's gone for
+    the day' from 'skip this one batch and keep going' — that only works if
+    the daily-quota case raises a dedicated type rather than a bare
+    RuntimeError shared with every other failure mode."""
+    def always_daily_quota():
+        raise Exception("Rate limit reached ... on tokens per day (TPD): Limit 200000.")  # noqa: TRY002
+
+    with pytest.raises(llm_module.DailyQuotaExceeded):
+        llm_module._call_with_rate_limit_retry(always_daily_quota)

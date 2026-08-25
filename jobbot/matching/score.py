@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from jobbot.config import load_profile_raw
 from jobbot.db import session_scope
-from jobbot.llm import call_tool
+from jobbot.llm import DailyQuotaExceeded, call_tool
 from jobbot.matching.profile_select import best_profile_for_job
 from jobbot.models import Job, JobScore
 from jobbot.resume import multi as multi_resume
@@ -130,4 +130,18 @@ def score_shortlist(shortlisted: list[tuple[Job, float]]) -> None:
         profile = profile_by_tag.get(tag, default_profile)
         for i in range(0, len(tag_jobs), BATCH_SIZE):
             batch = tag_jobs[i : i + BATCH_SIZE]
-            _score_batch(profile, batch, lex_by_id, tag)
+            try:
+                _score_batch(profile, batch, lex_by_id, tag)
+            except DailyQuotaExceeded:
+                raise  # every remaining batch would fail the same way today — stop, don't waste calls
+            except Exception:  # noqa: BLE001
+                # A run scoring hundreds/thousands of jobs against a free LLM
+                # tier will hit occasional unrecoverable batches (confirmed
+                # live: a malformed-JSON generation that exhausted its
+                # retries). Losing the whole run over one bad batch is worse
+                # than leaving a few jobs unscored — they stay unscored and
+                # get picked up by the next `jobbot match` run.
+                log.exception(
+                    "Failed to score batch (job ids %s) against profile %r; skipping and continuing",
+                    [job.id for job in batch], tag,
+                )

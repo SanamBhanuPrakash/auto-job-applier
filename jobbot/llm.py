@@ -103,6 +103,10 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return code == 429
 
 
+class DailyQuotaExceeded(RuntimeError):
+    """A provider's separate per-day (not per-minute) token/request budget was hit."""
+
+
 def _is_daily_quota_error(exc: BaseException) -> bool:
     """A 429 for hitting a per-minute token/request limit clears in seconds
     and is worth retrying. A 429 for hitting Groq's separate per-MODEL
@@ -118,6 +122,20 @@ def _is_daily_quota_error(exc: BaseException) -> bool:
     return "per day" in message or "tpd" in message or "rpd" in message
 
 
+def _is_malformed_tool_call_error(exc: BaseException) -> bool:
+    """Groq occasionally generates tool-call arguments that aren't valid
+    JSON — confirmed live scoring a 1200-job batch: a stray quote
+    (`"job_id":2523","score":30`) broke server-side parsing and Groq
+    rejected the whole request with a 400 'tool_use_failed' instead of ever
+    handing us the broken string to fix ourselves. This is a one-off
+    generation glitch (a fresh generation is usually well-formed), not a
+    bad request on our end, so it's worth an immediate retry rather than
+    crashing an entire — possibly hours-long — scoring run over one
+    unlucky batch.
+    """
+    return "tool_use_failed" in str(exc)
+
+
 def _call_with_rate_limit_retry(fn):
     delay = 2.0
     for attempt in range(MAX_RATE_LIMIT_RETRIES):
@@ -125,18 +143,25 @@ def _call_with_rate_limit_retry(fn):
             return fn()
         except Exception as exc:  # noqa: BLE001
             if _is_daily_quota_error(exc):
-                raise RuntimeError(
+                raise DailyQuotaExceeded(
                     "Hit a daily token/request quota on this model's free tier (not the per-minute "
                     "limit — that one retries automatically). Options: wait for it to reset (Groq's "
                     "error message above usually says how long), switch GROQ_MODEL in .env to a "
                     "different model (each has its own separate daily budget), or switch "
                     "LLM_PROVIDER for now. Original error: " + str(exc)
                 ) from exc
-            if not _is_rate_limit_error(exc) or attempt == MAX_RATE_LIMIT_RETRIES - 1:
+            malformed = _is_malformed_tool_call_error(exc)
+            if not (malformed or _is_rate_limit_error(exc)) or attempt == MAX_RATE_LIMIT_RETRIES - 1:
                 raise
-            log.warning("Rate limited (attempt %d/%d), waiting %.0fs: %s", attempt + 1, MAX_RATE_LIMIT_RETRIES, delay, exc)
-            time.sleep(delay)
-            delay *= 2
+            if malformed:
+                log.warning(
+                    "Model produced malformed tool-call JSON (attempt %d/%d), retrying: %s",
+                    attempt + 1, MAX_RATE_LIMIT_RETRIES, exc,
+                )
+            else:
+                log.warning("Rate limited (attempt %d/%d), waiting %.0fs: %s", attempt + 1, MAX_RATE_LIMIT_RETRIES, delay, exc)
+                time.sleep(delay)
+                delay *= 2
     raise AssertionError("unreachable")  # loop always returns or raises
 
 
