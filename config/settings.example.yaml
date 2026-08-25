@@ -48,7 +48,17 @@ search:
   # date; a posting jobbot can't parse a date for is kept regardless — see
   # jobbot/discovery/recency.py). Set to 0 to disable and keep everything
   # each source currently lists.
-  posted_within_days: 2
+  #
+  # 2 days was the original default and is too aggressive in practice —
+  # measured live: RemoteOK and Remotive's listings aren't re-timestamped
+  # daily even while still open, so a 2-day window was silently dropping
+  # ~100% of both (0 of 100 RemoteOK results, 0 of 18 Remotive kept).
+  # 30 still filters out genuinely stale listings almost entirely (Ashby's
+  # multi-year-old postings that originally motivated this filter stayed
+  # ~91% filtered even at this wider window) while actually keeping
+  # RemoteOK/Remotive's real current postings. Tighten this back down if
+  # you'd rather trade volume for freshness.
+  posted_within_days: 30
 
 aggregators:
   adzuna:

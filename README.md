@@ -18,10 +18,14 @@ part that gets people banned.
 
 1. **Discover** — polls public, keyless JSON APIs (Greenhouse, Lever, Ashby,
    SmartRecruiters, Recruitee, Workday, plus Adzuna/USAJobs/RemoteOK/Remotive)
-   for job postings, keeps only postings from roughly the last 1-2 days
-   (configurable; some sources list postings that are actually years old),
-   and stores them in a local SQLite DB, deduped so re-running never creates
-   duplicates. No scraping, no login.
+   for job postings, keeps only postings from roughly the last month by
+   default (configurable via `posted_within_days`; some sources list
+   postings that are actually years old — Ashby in particular, still
+   ~91%-filtered even at a 30-day window — while others like RemoteOK/
+   Remotive don't re-timestamp daily and were measured live losing
+   essentially 100% of their results to a tighter 2-day window, which is
+   why 30 is the default rather than 2), and stores them in a local SQLite
+   DB, deduped so re-running never creates duplicates. No scraping, no login.
 2. **Match** — a cheap local keyword/location filter shortlists postings,
    then the LLM reranks the shortlist against your parsed resume/profile and
    gives each a 0–100 fit score with reasoning.
@@ -240,6 +244,7 @@ jobbot list --min-score 70   # see what's worth applying to (shows matched resum
 jobbot show 42                # full posting + score reasoning + matched resume for job id 42
 jobbot apply 42                # open a real browser, fill it, review, confirm, submit
 jobbot batch --min-score 80 --limit 5   # do several, paced 45-180s apart, still reviewed one by one
+jobbot apply-all --min-score 60         # same thing, named for what people actually ask for — no job IDs to type, limit defaults to 500
 jobbot ledger                # what you've actually submitted, and when
 jobbot learned list           # what it's remembered so far, and how often each answer's been reused
 jobbot learned forget <id>    # delete one remembered answer (e.g. you mistyped it once)
@@ -437,6 +442,30 @@ protection, which is why discovery still works fine. Building around a
 deployed CAPTCHA would mean either a CAPTCHA-solving service or some other
 detection-evasion technique — not something this project does, for the same
 reason it doesn't automate LinkedIn/Indeed.
+
+**Wellfound and Cutshort were also checked, not assumed.** Both require a
+logged-in account to apply at all (there's no guest-apply hosted form the
+way Greenhouse/Lever have) — Wellfound's own Terms explicitly warn against
+automating past the manual apply click, and both platforms are the kind of
+authenticated, account-based service where automated traffic risks the
+account, the same category as LinkedIn/Indeed. Neither is implemented here,
+for the same reason those aren't.
+
+**MyGreenhouse (`my.greenhouse.io`) — the unified candidate-account layer
+that browses jobs across hundreds of Greenhouse customers with one login —
+was checked too, precisely because it's easy to confuse with the
+per-employer hosted forms this project *does* automate.** They're different
+products with different rules. The guest-apply hosted forms
+(`job-boards.greenhouse.io/<company>/...`) have no account and no
+anti-automation clause — that's what's implemented. MyGreenhouse is a
+separate, login-gated product, and its own User Agreement explicitly
+prohibits it: *"using automated means, including spiders, robots, crawlers,
+or similar means or processes to access or use the Services"*
+([my.greenhouse.io/users/agreement](https://my.greenhouse.io/users/agreement)).
+Not implemented, for the same reason Wellfound/Cutshort aren't — this one
+just happens to share a company name with the ATS this project does
+automate, which is exactly why it's worth spelling out instead of leaving
+ambiguous.
 
 **Wellfound and Cutshort were also checked, not assumed.** Both require a
 logged-in account to apply at all (there's no guest-apply hosted form the
