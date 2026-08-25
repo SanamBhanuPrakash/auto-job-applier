@@ -11,6 +11,7 @@ import httpx
 from jobbot.config import get_settings
 from jobbot.discovery.base import NormalizedJob
 from jobbot.utils.ratelimit import http_retry
+from jobbot.utils.textclean import strip_html
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def fetch_jobs(
                 url=item.get("redirect_url", ""),
                 location=location,
                 remote="remote" in location.lower(),
-                description=item.get("description", "") or "",
+                description=strip_html(item.get("description", "") or ""),
                 posted_at=item.get("created", ""),
                 ats="",
                 raw=item,

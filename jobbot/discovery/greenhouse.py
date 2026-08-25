@@ -10,6 +10,7 @@ import httpx
 
 from jobbot.discovery.base import NormalizedJob
 from jobbot.utils.ratelimit import http_retry
+from jobbot.utils.textclean import strip_html
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,9 @@ def fetch_jobs(company_slug: str, client: httpx.Client | None = None) -> list[No
                 url=item.get("absolute_url", ""),
                 location=location,
                 remote="remote" in location.lower(),
-                description=item.get("content", "") or "",
+                # Greenhouse's `content` field is raw HTML, confirmed live
+                # (e.g. `<div class="content-intro">...`) — see textclean.py.
+                description=strip_html(item.get("content", "") or ""),
                 posted_at=item.get("updated_at", ""),
                 ats="greenhouse",
                 raw=item,

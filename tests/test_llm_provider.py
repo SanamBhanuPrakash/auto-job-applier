@@ -78,6 +78,53 @@ def test_groq_client_constructed_when_key_present(monkeypatch):
     assert type(client).__module__.startswith("groq")
 
 
+def test_daily_quota_error_fails_fast_with_clear_message_no_retry(monkeypatch):
+    """Real error hit live: 'Rate limit reached ... on tokens per day (TPD):
+    Limit 200000, Used 199543 ... Please try again in 17m13.344s.' Retrying
+    that in seconds is pointless and previously burned the whole retry
+    budget before crashing with a raw stack trace — this should fail
+    immediately, on the first attempt, with an actionable message instead."""
+    calls = {"n": 0}
+
+    class FakeRateLimitError(Exception):
+        pass
+
+    def always_daily_quota():
+        calls["n"] += 1
+        raise FakeRateLimitError(
+            "Rate limit reached for model `openai/gpt-oss-120b` ... on tokens per day (TPD): "
+            "Limit 200000, Used 199543, Requested 2849. Please try again in 17m13.344s."
+        )
+
+    monkeypatch.setattr(llm_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="daily token/request quota"):
+        llm_module._call_with_rate_limit_retry(always_daily_quota)
+
+    assert calls["n"] == 1  # no wasted retries on something that won't clear in seconds
+
+
+def test_per_minute_rate_limit_still_retries_as_normal(monkeypatch):
+    """Sanity check the daily-quota detection doesn't accidentally swallow
+    the ordinary per-minute case this was already handling correctly."""
+    calls = {"n": 0}
+
+    class FakeRateLimitError(Exception):
+        pass
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise FakeRateLimitError("Rate limit reached ... on tokens per minute (TPM): Limit 6000.")
+        return "ok"
+
+    monkeypatch.setattr(llm_module.time, "sleep", lambda _seconds: None)
+    result = llm_module._call_with_rate_limit_retry(flaky)
+
+    assert result == "ok"
+    assert calls["n"] == 3
+
+
 def test_rate_limit_error_is_retried_then_succeeds(monkeypatch):
     calls = {"n": 0}
 

@@ -103,12 +103,35 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
     return code == 429
 
 
+def _is_daily_quota_error(exc: BaseException) -> bool:
+    """A 429 for hitting a per-minute token/request limit clears in seconds
+    and is worth retrying. A 429 for hitting Groq's separate per-MODEL
+    per-DAY token budget (confirmed live: `openai/gpt-oss-120b`'s free tier
+    caps at 200,000 tokens/day, independent of the per-minute limit) can
+    say "please try again in 17m43s" — retrying that with a few seconds of
+    backoff just burns the whole retry budget and then fails anyway with a
+    confusing stack trace. Detected by the wording Groq's own error message
+    uses ("tokens per day" / "requests per day"), so it fails fast instead
+    with a clear, actionable message.
+    """
+    message = str(exc).lower()
+    return "per day" in message or "tpd" in message or "rpd" in message
+
+
 def _call_with_rate_limit_retry(fn):
     delay = 2.0
     for attempt in range(MAX_RATE_LIMIT_RETRIES):
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001
+            if _is_daily_quota_error(exc):
+                raise RuntimeError(
+                    "Hit a daily token/request quota on this model's free tier (not the per-minute "
+                    "limit — that one retries automatically). Options: wait for it to reset (Groq's "
+                    "error message above usually says how long), switch GROQ_MODEL in .env to a "
+                    "different model (each has its own separate daily budget), or switch "
+                    "LLM_PROVIDER for now. Original error: " + str(exc)
+                ) from exc
             if not _is_rate_limit_error(exc) or attempt == MAX_RATE_LIMIT_RETRIES - 1:
                 raise
             log.warning("Rate limited (attempt %d/%d), waiting %.0fs: %s", attempt + 1, MAX_RATE_LIMIT_RETRIES, delay, exc)
