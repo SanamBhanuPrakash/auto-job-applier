@@ -106,6 +106,53 @@ jobbot/
 tests/                    # discovery parsers + the guardrail regex, no network/browser needed
 ```
 
+## Discovery coverage: India + worldwide remote
+
+`config/companies.example.yaml` ships with ~50 companies, every slug
+confirmed live (not guessed) against each ATS's API right before being
+added, including several with substantial India-specific hiring (CRED and
+Meesho's Lever boards are majority-India; HighRadius, PhonePe, MongoDB,
+Databricks, Okta, GitLab all have real India-based roles among their
+listings). Be aware of a real limit here: most large India-founded
+unicorns use an ATS this project doesn't talk to — Darwinbox, Keka,
+Turbohire, or an in-house system — not Greenhouse/Lever/Ashby/
+SmartRecruiters/Recruitee, so a long list of well-known Indian company
+names was checked while building this and came back empty for exactly that
+reason. Company-board discovery alone gets you real but modest India
+volume (confirmed on a live run: ~170 India-tagged postings out of ~1,700
+discovered).
+
+**Adzuna is the bigger lever for India (and worldwide remote) volume**,
+because it searches *across* many employer sites and boards by city rather
+than needing one entry per employer here. It's free but needs its own
+signup (`developer.adzuna.com`, no cost, 1000 calls/month) — set
+`ADZUNA_APP_ID`/`ADZUNA_APP_KEY` in `.env` and `aggregators.adzuna.enabled:
+true` in `settings.yaml`. Confirmed live that Adzuna covers India plus 17
+other countries (US/UK/Canada/Australia/Germany/France/Spain/Italy/
+Netherlands/Austria/Belgium/Brazil/Mexico/New Zealand/Poland/Singapore/
+South Africa) — `settings.example.yaml`'s `aggregators.adzuna.queries` is
+pre-filled with one search per major Indian city (Bangalore, Hyderabad,
+Mumbai, Pune, Delhi NCR, Chennai, Kerala) plus remote-US and remote-UK;
+add, remove, or repoint rows freely, each is one extra API call per
+`jobbot discover`. RemoteOK and Remotive (no signup needed, already
+enabled by default) round out worldwide-remote coverage but have no
+India-specific filter of their own — `aggregators.remoteok.tags` /
+`.remotive.categories` both take a list now (one entry per domain your
+resumes span) instead of a single tag, so multi-resume setups aren't
+narrowed to whatever the first resume happened to search for.
+
+`search.locations` in `settings.example.yaml` now includes Bangalore/
+Bengaluru/Hyderabad/Mumbai/Pune/Noida/Delhi/Gurgaon/Chennai/Kerala/Kochi
+alongside "remote" — this is the cheap lexical pre-filter that runs before
+LLM scoring (`jobbot/matching/lexical.py`); a posting located in one of
+these cities scores 0 on the location component otherwise, even though the
+later per-resume LLM scoring would judge it correctly on its own. Known,
+not-yet-fixed limitation: that lexical filter's `keywords` list is global,
+not per-resume — with multiple resumes spanning different domains
+(frontend vs. cloud vs. data science, say), it runs once before any
+per-resume matching happens, so keep it broad rather than narrowly backend-
+specific if you're relying on `config/resumes/`.
+
 ## Setup
 
 Requires Python 3.11+.

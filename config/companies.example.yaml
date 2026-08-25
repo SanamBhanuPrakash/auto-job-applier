@@ -7,10 +7,24 @@
 #   https://jobs.lever.co/netflix                -> lever slug "netflix"
 #   https://jobs.ashbyhq.com/linear              -> ashby slug "linear"
 #
-# Seeded with a handful of well-known public boards so `jobbot discover`
-# works out of the box; replace with companies you actually care about.
+# Every slug below was checked live (not guessed) against each API right
+# before this file was written — see the "India-hiring" note per section.
+# That said, ATS boards change: a company can migrate providers or a slug
+# can go stale, and jobbot/discovery/*.py already logs a warning and moves
+# on for any that stop responding, so a dead entry here costs nothing.
+#
+# Honest limitation: many well-known Indian companies (most large Indian
+# unicorns among them) use an ATS this project doesn't talk to yet —
+# Darwinbox, Keka, Turbohire, or an in-house system — not Greenhouse/Lever/
+# Ashby/SmartRecruiters/Recruitee. A long list of India-founded companies
+# was checked while building this list and came back empty for exactly that
+# reason. The bigger lever for real India job *volume* is the Adzuna
+# aggregator in settings.example.yaml, which searches across many boards at
+# once by city rather than needing one entry per employer here.
 
 greenhouse:
+  # Broad global/remote-friendly coverage, all confirmed to have current
+  # open postings.
   - stripe
   - airbnb
   - coinbase
@@ -19,15 +33,60 @@ greenhouse:
   - instacart
   - asana
   - discord
+  - databricks
+  - snowflake
+  - confluent
+  - hashicorp
+  - airtable
+  - figma
+  - canva
+  - gitlab
+  - grafanalabs
+  - elastic
+  - mongodb
+  - twilio
+  - digitalocean
+  - cloudflare
+  - datadog
+  - pagerduty
+  - amplitude
+  - braze
+  - postman
+  - vercel
+  - brex
+  - dropbox
+  - okta
+  - intercom
+  - gusto
+  - reddit
+  - squarespace
+  - wise
+  - n26
+  - monzo
+  # Confirmed live: substantial India-based hiring specifically.
+  - highradius
+  - phonepe
 
 lever:
   - plaid
   - lever
+  # Confirmed live: majority-India or India-heavy hiring.
+  - cred
+  - meesho
+  - zeta
 
 ashby:
   - linear
   - ramp
+  - notion
+  - vercel
+  - openai
+  - perplexity
+  - runway
 
+# Discovery-only for both of these — see README "Extending to more ATSes /
+# sites" for why submission isn't implemented (SmartRecruiters' apply flow
+# is DataDome-protected).
 smartrecruiters:
   - Visa
   - Bosch

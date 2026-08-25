@@ -2,18 +2,46 @@
 
 search:
   # Free-text keywords that must appear (case-insensitive) in title or
-  # description for a role to be kept after the cheap lexical filter.
+  # description for a role to be kept after the cheap lexical filter. This
+  # list is GLOBAL — it runs once, before any per-resume matching (see
+  # jobbot/matching/profile_select.py), so if you're using multiple resumes
+  # (config/resumes/) keep it broad enough to not systematically favor one
+  # domain over the others; the later per-resume LLM scoring is what
+  # actually judges fit precisely.
   keywords:
-    - "backend"
+    - "engineer"
+    - "developer"
+    - "software"
     - "python"
-    - "platform"
+    - "backend"
+    - "frontend"
+    - "full stack"
+    - "data"
+    - "machine learning"
+    - "cloud"
+    - "devops"
   exclude_keywords:
     - "staff"
     - "principal"
     - "director"
+  # Include every city/region you actually want credited during the cheap
+  # shortlist pass — a job located in Bangalore scores 0 on location match
+  # here unless "bangalore" (or "remote") is in this list, even though the
+  # later LLM scoring would judge it correctly on its own.
   locations:
     - "remote"
-    - "united states"
+    - "india"
+    - "bangalore"
+    - "bengaluru"
+    - "hyderabad"
+    - "mumbai"
+    - "pune"
+    - "noida"
+    - "delhi"
+    - "gurgaon"
+    - "chennai"
+    - "kerala"
+    - "kochi"
   remote_only: false
   min_score: 65 # 0-100, from the Claude reranker; below this a job is discovered but not shortlisted
   # Only keep postings from roughly this many days back (source-reported
@@ -24,18 +52,64 @@ search:
 
 aggregators:
   adzuna:
-    enabled: false
-    what: "backend engineer"
-    where: "remote"
+    enabled: false # needs a free key: https://developer.adzuna.com (app_id + app_key)
+    # One entry per city/market you want searched — confirmed live that
+    # Adzuna covers India plus 17 other countries (US/UK/Canada/Australia/
+    # Germany/France/Spain/Italy/Netherlands/Austria/Belgium/Brazil/Mexico/
+    # New Zealand/Poland/Singapore/South Africa). Country codes are
+    # lowercase ISO (in, us, gb, ...). Add/remove rows freely; each is one
+    # extra API call per `jobbot discover`, and the free tier is 1000
+    # calls/month.
+    queries:
+      - what: "software engineer"
+        where: "Bangalore"
+        country: in
+      - what: "software engineer"
+        where: "Hyderabad"
+        country: in
+      - what: "software engineer"
+        where: "Mumbai"
+        country: in
+      - what: "software engineer"
+        where: "Pune"
+        country: in
+      - what: "software engineer"
+        where: "Delhi NCR"
+        country: in
+      - what: "software engineer"
+        where: "Chennai"
+        country: in
+      - what: "software engineer"
+        where: "Kerala"
+        country: in
+      - what: "software engineer"
+        where: "remote"
+        country: us
+      - what: "software engineer"
+        where: "remote"
+        country: gb
   usajobs:
     enabled: false
     keyword: "software engineer"
   remoteok:
     enabled: true
-    tag: "python"
+    # One search per domain your resumes span — RemoteOK has no India-
+    # specific filter (it's a global remote-jobs board), so this is your
+    # worldwide-remote source, not your India one; use Adzuna above for India.
+    tags:
+      - "python"
+      - "backend"
+      - "frontend"
+      - "machine-learning"
+      - "data-science"
+      - "cloud"
+      - "devops"
   remotive:
     enabled: true
-    category: "software-dev"
+    categories:
+      - "software-dev"
+      - "data"
+      - "devops-sysadmin"
 
 submission:
   # Only these ATS platforms have submission handlers implemented.
