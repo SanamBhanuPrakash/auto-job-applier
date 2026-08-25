@@ -17,11 +17,20 @@ def show_review(
     screenshot_path: Path,
     needs_human: list[FieldSpec],
     memory_hints: dict[int, str] | None = None,
+    auto_filled_sensitive: list[tuple[str, str]] | None = None,
 ) -> None:
     memory_hints = memory_hints or {}
     console.rule(f"[bold]{job.title} @ {job.company}[/bold]")
     console.print(f"URL: {job.url}")
     console.print(f"Screenshot saved to: {screenshot_path}")
+
+    if auto_filled_sensitive:
+        table = Table(title="[bold yellow]Sensitive answers auto-filled from memory this run[/bold yellow]")
+        table.add_column("Question")
+        table.add_column("Answer used")
+        for label, value in auto_filled_sensitive:
+            table.add_row(label, value)
+        console.print(table)
 
     if needs_human:
         table = Table(title="Fields left for you to fill in the open browser window")

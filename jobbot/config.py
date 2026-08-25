@@ -25,9 +25,17 @@ class Settings(BaseSettings):
 
     jobbot_data_dir: Path = Path("./data")
     jobbot_resume_path: Path = Path("./data/resume.pdf")
+    jobbot_resumes_dir: Path = Path("./config/resumes")
 
     jobbot_headless: bool = False
     jobbot_auto_submit: bool = False
+    # Off by default. When on, a previously-confirmed answer to a sensitive
+    # question (work authorization, EEOC, legal attestation, ...) is reused
+    # automatically instead of always stopping for review. Turning it on
+    # still requires one explicit typed confirmation per run (see cli.py
+    # _confirm_sensitive_autofill) listing exactly which saved answers will
+    # be reused — this flag alone does not silently enable it.
+    jobbot_autofill_sensitive: bool = False
 
     @property
     def data_dir(self) -> Path:
@@ -35,6 +43,10 @@ class Settings(BaseSettings):
         d.mkdir(parents=True, exist_ok=True)
         (d / "screenshots").mkdir(exist_ok=True)
         return d
+
+    @property
+    def resumes_dir(self) -> Path:
+        return (REPO_ROOT / self.jobbot_resumes_dir).resolve()
 
     @property
     def db_path(self) -> Path:

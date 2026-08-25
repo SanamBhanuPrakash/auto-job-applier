@@ -1,7 +1,10 @@
 """Orchestrates one application attempt end to end:
 
-  detect ATS -> open browser -> scan form -> LLM fill plan -> fill+verify
-  -> screenshot -> human review -> (only on explicit "yes") submit -> log
+  pick profile (per-job matched resume, or the global default) -> open
+  browser -> scan form -> resolve learned/circuit-broken fields -> LLM fill
+  plan for the rest -> fill+verify -> screenshot -> human review -> (only on
+  explicit "yes", or auto_submit) -> submit -> capture what was learned ->
+  log
 
 Uses a persistent browser profile (launch_persistent_context) so cookies and
 any manual login you do survive between runs, per the research's note that a
@@ -18,6 +21,7 @@ from jobbot.config import get_settings, load_profile_raw
 from jobbot.db import session_scope
 from jobbot.learning import store as learning_store
 from jobbot.models import Application, Job
+from jobbot.resume import multi as multi_resume
 from jobbot.resume.schema import Profile
 from jobbot.submit import greenhouse, lever
 from jobbot.submit.ats_detect import detect_ats
@@ -38,7 +42,30 @@ def _user_data_dir() -> Path:
     return d
 
 
-def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Application:
+def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
+    """Uses the resume/profile `jobbot match` decided fits this job best
+    (config/resumes/<tag>), falling back to the single global
+    config/profile.yaml + JOBBOT_RESUME_PATH when no resumes/ folder has
+    been imported or nothing was matched for this job."""
+    settings = get_settings()
+    if job.matched_profile_tag:
+        row = multi_resume.get_profile(job.matched_profile_tag)
+        if row is not None:
+            return Profile.model_validate(row.profile_json), Path(row.resume_path)
+        log.warning(
+            "Job %d was matched to profile %r but it no longer exists; falling back to the default profile",
+            job.id,
+            job.matched_profile_tag,
+        )
+    return Profile.model_validate(load_profile_raw()), settings.jobbot_resume_path
+
+
+def apply_to_job(
+    job: Job,
+    *,
+    auto_submit_override: bool | None = None,
+    autofill_sensitive_override: bool | None = None,
+) -> Application:
     settings = get_settings()
     ats = job.ats or detect_ats(job.url)
     if ats not in _ATS_MODULES:
@@ -47,7 +74,10 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             f"Supported: {list(_ATS_MODULES)}. Apply manually for this one."
         )
     ats_module = _ATS_MODULES[ats]
-    profile = Profile.model_validate(load_profile_raw())
+    profile, resume_path = _resolve_profile_and_resume(job)
+    autofill_sensitive = (
+        settings.jobbot_autofill_sensitive if autofill_sensitive_override is None else autofill_sensitive_override
+    )
 
     with session_scope() as session:
         application = Application(job_id=job.id, status="attempted")
@@ -71,40 +101,78 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             fields = scan_form(form_ctx)
             job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:2000]}"
 
-            # Reuse answers this field's question has gotten before. Sensitive
-            # questions never get auto-filled from memory (only surfaced as a
-            # hint below); non-sensitive ones bypass the LLM call entirely.
             with session_scope() as session:
                 matches = learning_store.match_fields(session, fields)
-                learned = {
-                    fid: {"value": m.value, "sensitive": m.sensitive, "times_used": m.times_used}
-                    for fid, m in matches.items()
+                by_id = {f.field_id: f for f in fields}
+                learned = {}
+                for fid, m in matches.items():
+                    field = by_id[fid]
+                    if not learning_store.value_still_offerable(field, m.value):
+                        continue  # this posting's options don't include the remembered value — don't guess
+                    learned[fid] = {"value": m.value, "sensitive": m.sensitive, "times_used": m.times_used}
+
+                circuit_broken_ids = {
+                    f.field_id for f in fields if learning_store.is_circuit_broken(session, f.label)
                 }
 
             memory_hints = {fid: h["value"] for fid, h in learned.items() if h["sensitive"]}
-            remembered_plan = {
-                fid: {
+            by_field_id = {f.field_id: f for f in fields}
+            auto_filled_sensitive = [
+                (by_field_id[fid].label, h["value"])
+                for fid, h in learned.items()
+                if h["sensitive"] and autofill_sensitive
+            ]
+
+            remembered_plan: dict[int, dict] = {}
+            for fid, h in learned.items():
+                if h["sensitive"] and not autofill_sensitive:
+                    continue  # shown as a hint only — see memory_hints above
+                remembered_plan[fid] = {
                     "value": h["value"],
                     "needs_human": False,
-                    "reasoning": f"Reused from memory (answered the same way {h['times_used']} time(s) before).",
+                    "reasoning": (
+                        f"Auto-filled from your confirmed answer (used {h['times_used']} time(s) before)"
+                        + (" — sensitive-field autofill is enabled." if h["sensitive"] else ".")
+                    ),
                 }
-                for fid, h in learned.items()
-                if not h["sensitive"]
+
+            circuit_broken_plan = {
+                fid: {"value": None, "needs_human": True, "reasoning": "This question has failed to auto-fill before; needs your input."}
+                for fid in circuit_broken_ids
+                if fid not in remembered_plan
             }
-            llm_fields = [f for f in fields if f.field_id not in remembered_plan]
+
+            llm_fields = [
+                f for f in fields
+                if f.field_id not in remembered_plan and f.field_id not in circuit_broken_plan
+            ]
 
             plan = build_fill_plan(profile, llm_fields, job_context)
             plan.update(remembered_plan)
+            plan.update(circuit_broken_plan)
 
-            if settings.jobbot_resume_path.exists():
-                upload_resume(form_ctx, fields, settings.jobbot_resume_path)
+            if resume_path.exists():
+                upload_resume(form_ctx, fields, resume_path)
+            else:
+                log.warning("Resume file %s not found — resume upload skipped", resume_path)
 
             needs_human = apply_fill_plan(form_ctx, fields, plan)
+
+            # Fields we planned to auto-fill (not flagged, had a value) that
+            # still ended up needing a human are genuine fill failures —
+            # feed the circuit breaker so repeats of this exact question
+            # stop being retried automatically.
+            attempted_ids = {fid for fid, d in plan.items() if not d["needs_human"] and d.get("value")}
+            failed_specs = [f for f in needs_human if f.field_id in attempted_ids]
+            if failed_specs:
+                with session_scope() as session:
+                    for f in failed_specs:
+                        learning_store.record_failure(session, f.label, "fill did not verify after retry")
 
             screenshot_path = settings.data_dir / "screenshots" / f"application_{app_id}.png"
             page.screenshot(path=str(screenshot_path), full_page=True)
 
-            show_review(job, screenshot_path, needs_human, memory_hints)
+            show_review(job, screenshot_path, needs_human, memory_hints, auto_filled_sensitive)
 
             auto_submit = settings.jobbot_auto_submit if auto_submit_override is None else auto_submit_override
             if auto_submit and needs_human:
@@ -160,13 +228,26 @@ def apply_to_job(job: Job, *, auto_submit_override: bool | None = None) -> Appli
             context.close()
 
 
-def apply_to_jobs(jobs: list[Job], *, pacing_min: float, pacing_max: float) -> list[Application]:
+def apply_to_jobs(
+    jobs: list[Job],
+    *,
+    pacing_min: float,
+    pacing_max: float,
+    auto_submit_override: bool | None = None,
+    autofill_sensitive_override: bool | None = None,
+) -> list[Application]:
     from jobbot.utils.ratelimit import human_pause
 
     results = []
     for i, job in enumerate(jobs):
         log.info("Applying to job %d/%d: %s @ %s", i + 1, len(jobs), job.title, job.company)
-        results.append(apply_to_job(job))
+        results.append(
+            apply_to_job(
+                job,
+                auto_submit_override=auto_submit_override,
+                autofill_sensitive_override=autofill_sensitive_override,
+            )
+        )
         if i < len(jobs) - 1:
             human_pause(pacing_min, pacing_max)
     return results

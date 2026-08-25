@@ -141,6 +141,45 @@ def test_fill_verify_and_leave_sensitive_fields_untouched(browser):
     page.close()
 
 
+def test_sensitive_field_fills_when_plan_says_not_needs_human(browser):
+    """submit/base.py is the only place that decides whether a sensitive
+    field's plan entry gets needs_human=False (only when
+    JOBBOT_AUTOFILL_SENSITIVE is on AND the run was confirmed AND the
+    remembered value is still a valid option — see value_still_offerable).
+    This confirms that once base.py has made that decision, the actual
+    fill mechanics work identically to any other field — apply_fill_plan
+    itself has no separate sensitivity concept."""
+    page = browser.new_page()
+    page.goto(APPLICATION_FORM.as_uri())
+    fields = scan_form(page)
+    by_label = {f.label.strip(): f for f in fields}
+    work_auth = next(f for f in fields if f.field_type == "radio" and "authorized to work" in f.label.lower())
+
+    assert is_sensitive(work_auth.label)
+    assert learning_store.value_still_offerable(work_auth, "Yes")  # "Yes" is a real option on this form
+
+    plan = {work_auth.field_id: {"value": "Yes", "needs_human": False, "reasoning": "autofill_sensitive enabled"}}
+    needs_human = apply_fill_plan(page, fields, plan)
+
+    assert read_field_value(page, work_auth) == "Yes"
+    assert work_auth.field_id not in {f.field_id for f in needs_human}
+
+    page.close()
+
+
+def test_stale_learned_value_not_offered_when_options_changed(browser):
+    """Guards the failure mode autofill_sensitive is riskiest for: a
+    remembered answer that no longer matches what this specific posting's
+    form actually offers should never be silently applied."""
+    page = browser.new_page()
+    page.goto(APPLICATION_FORM.as_uri())
+    fields = scan_form(page)
+    work_auth = next(f for f in fields if f.field_type == "radio" and "authorized to work" in f.label.lower())
+
+    assert not learning_store.value_still_offerable(work_auth, "Not applicable")
+    page.close()
+
+
 def test_resume_upload_targets_file_input_directly(browser):
     page = browser.new_page()
     page.goto(APPLICATION_FORM.as_uri())

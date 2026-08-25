@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jobbot.learning.normalize import normalize_label
-from jobbot.models import LearnedAnswer
+from jobbot.models import FieldIssue, LearnedAnswer
 from jobbot.submit.form_scan import FieldSpec, FrameLike
 
 log = logging.getLogger(__name__)
@@ -39,22 +39,24 @@ def eligible_for_learning(field_type: str, value: str) -> bool:
     return True
 
 
-def find_match(session: Session, label: str, field_type: str) -> LearnedAnswer | None:
+def _fuzzy_find(session: Session, model, label: str):
+    """Exact normalized-key match first, falling back to the closest
+    fuzzy match (token_set_ratio, robust to reordering and to one label
+    containing extra words the other doesn't — "legally", "United States"
+    vs "US"). Shared by LearnedAnswer lookups and FieldIssue/circuit-breaker
+    lookups so a reworded question resolves to the same row either way.
+    """
     key = normalize_label(label)
     if not key:
         return None
 
-    exact = session.execute(
-        select(LearnedAnswer).where(LearnedAnswer.question_key == key)
-    ).scalar_one_or_none()
+    exact = session.execute(select(model).where(model.question_key == key)).scalar_one_or_none()
     if exact is not None:
         return exact
 
-    best: LearnedAnswer | None = None
+    best = None
     best_score = 0.0
-    for candidate in session.execute(select(LearnedAnswer)).scalars():
-        # token_set_ratio: robust to reordering and to one label containing
-        # extra words the other doesn't ("legally", "United States" vs "US").
+    for candidate in session.execute(select(model)).scalars():
         score = fuzz.token_set_ratio(key, candidate.question_key)
         if score > best_score:
             best_score = score
@@ -63,6 +65,10 @@ def find_match(session: Session, label: str, field_type: str) -> LearnedAnswer |
     if best is not None and best_score >= FUZZY_MATCH_THRESHOLD:
         return best
     return None
+
+
+def find_match(session: Session, label: str, field_type: str) -> LearnedAnswer | None:
+    return _fuzzy_find(session, LearnedAnswer, label)
 
 
 def match_fields(session: Session, fields: list[FieldSpec]) -> dict[int, LearnedAnswer]:
@@ -105,6 +111,57 @@ def upsert(session: Session, label: str, field_type: str, value: str, sensitive:
     return row
 
 
+def value_still_offerable(field: FieldSpec, value: str) -> bool:
+    """A learned value for a select/radio field is only safe to reuse if
+    the current form still actually offers it as an option — the option
+    list can differ per employer/posting even for a similarly-worded
+    question. Text/textarea/combobox/checkbox fields have no fixed option
+    list to check against.
+    """
+    if field.field_type in ("select", "radio"):
+        return any(value.strip().lower() == opt.strip().lower() for opt in field.options)
+    return True
+
+
+# --- fill-failure circuit breaker -------------------------------------------
+# A question that has failed to auto-fill this many times in a row stops
+# being retried automatically and routes straight to human review instead —
+# see is_circuit_broken / record_failure / clear_failure, wired in
+# submit/base.py around the fill step.
+CIRCUIT_BREAKER_THRESHOLD = 2
+
+
+def is_circuit_broken(session: Session, label: str) -> bool:
+    row = _fuzzy_find(session, FieldIssue, label)
+    return row is not None and row.failure_count >= CIRCUIT_BREAKER_THRESHOLD
+
+
+def record_failure(session: Session, label: str, error: str) -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    row = _fuzzy_find(session, FieldIssue, label)
+    if row is None:
+        row = FieldIssue(question_key=normalize_label(label), label_raw=label, failure_count=0)
+        session.add(row)
+    row.failure_count += 1
+    row.label_raw = label
+    row.last_error = (error or "")[:500]
+    row.last_seen_at = now
+    if row.failure_count >= CIRCUIT_BREAKER_THRESHOLD:
+        log.warning(
+            "Field %r has now failed to auto-fill %d time(s) — will route straight to human review from now on",
+            label,
+            row.failure_count,
+        )
+
+
+def clear_failure(session: Session, label: str) -> None:
+    """Called whenever a value is successfully captured for a question —
+    evidence it's fillable again, so let it be attempted automatically."""
+    row = _fuzzy_find(session, FieldIssue, label)
+    if row is not None:
+        session.delete(row)
+
+
 def capture_from_page(session: Session, page: FrameLike, fields: list[FieldSpec]) -> int:
     """Reads whatever ended up in each field (auto-filled or typed by the
     human) right before submit and remembers anything eligible. Called
@@ -123,6 +180,7 @@ def capture_from_page(session: Session, page: FrameLike, fields: list[FieldSpec]
             continue
         sensitive = bool(_ALWAYS_HUMAN_RE.search(field.label))
         upsert(session, field.label, field.field_type, value, sensitive)
+        clear_failure(session, field.label)  # it clearly can be filled now
         count += 1
 
     if count:

@@ -31,6 +31,11 @@ class Job(Base):
     ats: Mapped[str] = mapped_column(String(32), default="")  # normalized ATS type for submission routing
     discovered_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Tag of the ResumeProfile jobbot decided fits this job best (set by
+    # `jobbot match` when multiple resumes are configured). Empty means
+    # either no resumes/ folder was imported, or nothing matched — falls
+    # back to the single config/profile.yaml.
+    matched_profile_tag: Mapped[str] = mapped_column(String(128), default="")
 
     score: Mapped["JobScore"] = relationship(back_populates="job", uselist=False, cascade="all, delete-orphan")
     applications: Mapped[list["Application"]] = relationship(back_populates="job", cascade="all, delete-orphan")
@@ -78,10 +83,44 @@ class LearnedAnswer(Base):
     label_raw: Mapped[str] = mapped_column(String(512))
     field_type: Mapped[str] = mapped_column(String(32))
     value: Mapped[str] = mapped_column(Text)
-    # Sensitive answers (work auth, EEOC, legal attestations, ...) are still
-    # never auto-filled — see fill_planner._ALWAYS_HUMAN_RE — this only lets
-    # the review step remind you what you answered last time.
+    # Sensitive answers (work auth, EEOC, legal attestations, ...) are only
+    # auto-filled when JOBBOT_AUTOFILL_SENSITIVE is explicitly enabled AND
+    # the run's one-time confirmation has been accepted — see
+    # jobbot/submit/base.py and cli.py's _confirm_sensitive_autofill.
     sensitive: Mapped[bool] = mapped_column(default=False)
     times_used: Mapped[int] = mapped_column(default=1)
     last_used_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ResumeProfile(Base):
+    """One parsed+tagged resume from config/resumes/. When this table has
+    rows, `jobbot match` picks the best-fitting one per job instead of the
+    single global config/profile.yaml — see jobbot/resume/multi.py.
+    """
+
+    __tablename__ = "resume_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tag: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    resume_path: Mapped[str] = mapped_column(String(1024))
+    profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class FieldIssue(Base):
+    """Tracks repeated auto-fill failures for a question, keyed the same way
+    as LearnedAnswer. Once failure_count crosses the circuit-breaker
+    threshold, jobbot stops attempting to auto-fill that question and routes
+    straight to human review instead of retrying the same failure forever.
+    See jobbot/learning/store.py record_failure/is_circuit_broken.
+    """
+
+    __tablename__ = "field_issues"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    label_raw: Mapped[str] = mapped_column(String(512), default="")
+    failure_count: Mapped[int] = mapped_column(default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
