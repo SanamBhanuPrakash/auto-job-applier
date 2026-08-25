@@ -29,7 +29,13 @@ part that gets people banned.
    guest-apply-friendly hosted forms), Playwright opens the real form, the
    LLM proposes a fill plan using *only* facts from your profile, every field
    gets filled and verified, and then **you** review a screenshot and the
-   list of fields it left blank before typing `yes` to actually submit.
+   list of fields it left blank before typing `yes` to actually submit. Open-
+   ended questions ("Why do you want to work here?") get a real, specific
+   answer grounded in the job context and your actual background — not left
+   blank, and written to read like a person wrote it (varied phrasing,
+   concrete details, none of the "As a passionate..." tells) rather than
+   obvious template filler. See `jobbot/submit/fill_planner.py`'s system
+   prompt for exactly what "specific, not generic" means here.
 4. **Remember** — every field it fills (or you fill) gets captured under a
    normalized version of its question text. The next application that asks
    the same thing — even worded differently ("Are you authorized to work in
@@ -125,12 +131,27 @@ trade-off is a 6,000-tokens/minute rate limit on the free tier — that's why
 `matching/score.py` batches conservatively and `jobbot/llm.py` retries
 rate-limit errors with backoff instead of failing.
 
+**Have a Google AI subscription and want to use Gemini instead?** A Google
+AI Pro/Ultra subscription is a separate consumer product from the Gemini
+API and doesn't grant API access either (checked directly — same gap as
+Claude Pro not covering the Anthropic API). You still need a free API key
+from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no
+card required), then set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` in
+`.env`. Roomier free-tier limits than Groq (250k tokens/minute vs. 6k as of
+the 3.7 Flash generation) — but weigh this: Gemini's free tier terms let
+Google use your inputs/outputs to improve their models, which Groq's free
+tier explicitly does not, and your resume is what's going through it. If
+that trade-off doesn't sit right, enabling Cloud Billing on the same key
+removes that clause (and raises the limits further) for a small per-token
+cost — or just stick with Groq.
+
 **A Claude.ai Pro/Max subscription does NOT work here** — that covers the
 chat app and Claude Code itself, not the separate pay-as-you-go Anthropic
 API (`api.anthropic.com`) this project would otherwise call. If you'd
 rather use Claude and don't mind its (usage-based, typically well under $1
 for a heavy day of resume-parsing + scoring + form-filling at this
-project's scale — but a real charge, unlike Groq) cost, get a key at
+project's scale — but a real charge, unlike Groq/Gemini's free tiers)
+cost, get a key at
 [console.anthropic.com](https://console.anthropic.com), set
 `LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env` instead, and feel
 free to raise `matching/score.py`'s `BATCH_SIZE` back up since Anthropic has
@@ -335,7 +356,7 @@ Other things baked in rather than left to a prompt:
   `companies.yaml` — there's no enumeration endpoint, and it keeps discovery
   scoped to employers you actually chose.
 
-## Extending to more ATSes
+## Extending to more ATSes / sites
 
 `Ashby`, `SmartRecruiters`, and `Recruitee` are already wired up for
 *discovery* (see `config/companies.example.yaml`) but not for *submission* —
@@ -346,6 +367,30 @@ a submit-button selector — the generic scanner/filler handle the rest) and
 `jobbot/submit/greenhouse.py` for a platform with non-native dropdowns.
 Workday is explicitly out of scope here — the research this was built from
 flags it as needing a vision-LLM approach, not a static-selector one.
+
+**SmartRecruiters was checked and ruled out for submission, not just left
+undone.** Its application-submission page
+(`jobs.smartrecruiters.com/oneclick-ui/...`) is protected by DataDome, a
+commercial anti-bot/CAPTCHA service — confirmed live against two unrelated
+companies' postings (SmartRecruiters' own careers page and a Sandisk
+posting), so it's a platform-wide protection on the submit flow, not one
+employer's configuration. The read-only job-listing pages have no such
+protection, which is why discovery still works fine. Building around a
+deployed CAPTCHA would mean either a CAPTCHA-solving service or some other
+detection-evasion technique — not something this project does, for the same
+reason it doesn't automate LinkedIn/Indeed.
+
+**Wellfound and Cutshort were also checked, not assumed.** Both require a
+logged-in account to apply at all (there's no guest-apply hosted form the
+way Greenhouse/Lever have) — Wellfound's own Terms explicitly warn against
+automating past the manual apply click, and both platforms are the kind of
+authenticated, account-based service where automated traffic risks the
+account, the same category as LinkedIn/Indeed. Neither is implemented here,
+for the same reason those aren't.
+
+None of this rules out *discovery* for platforms with public listings —
+just automated *submission* where a site has specifically defended against
+it (technically, contractually, or both).
 
 ## Testing
 

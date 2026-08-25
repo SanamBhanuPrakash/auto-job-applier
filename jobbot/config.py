@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.7-flash"
+
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
 
