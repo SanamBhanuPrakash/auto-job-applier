@@ -16,6 +16,11 @@ search:
     - "united states"
   remote_only: false
   min_score: 65 # 0-100, from the Claude reranker; below this a job is discovered but not shortlisted
+  # Only keep postings from roughly this many days back (source-reported
+  # date; a posting jobbot can't parse a date for is kept regardless — see
+  # jobbot/discovery/recency.py). Set to 0 to disable and keep everything
+  # each source currently lists.
+  posted_within_days: 2
 
 aggregators:
   adzuna:

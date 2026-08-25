@@ -10,6 +10,7 @@ from jobbot.config import load_companies, load_search_settings
 from jobbot.db import session_scope
 from jobbot.discovery import adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs
 from jobbot.discovery.base import NormalizedJob
+from jobbot.discovery.recency import filter_recent
 from jobbot.models import Job
 
 log = logging.getLogger(__name__)
@@ -93,7 +94,18 @@ def persist_jobs(jobs: list[NormalizedJob]) -> tuple[int, int]:
     return inserted, skipped
 
 
-def run_discovery() -> tuple[int, int]:
+def run_discovery(max_age_days: float | None = None) -> tuple[int, int]:
+    """max_age_days: only keep postings from roughly this many days back
+    (a posting with no parseable date is kept regardless — see recency.py).
+    None uses config/settings.yaml's search.posted_within_days; 0 or that
+    key being absent disables the filter entirely."""
     jobs = discover_ats_jobs() + discover_aggregator_jobs()
     log.info("Discovered %d raw postings before dedupe", len(jobs))
+
+    if max_age_days is None:
+        search_cfg = load_search_settings().get("search", {}) or {}
+        max_age_days = search_cfg.get("posted_within_days", 0)
+    if max_age_days:
+        jobs = filter_recent(jobs, max_age_days)
+
     return persist_jobs(jobs)

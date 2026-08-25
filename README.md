@@ -17,7 +17,10 @@ part that gets people banned.
 
 1. **Discover** — polls public, keyless JSON APIs (Greenhouse, Lever, Ashby,
    SmartRecruiters, Recruitee, plus Adzuna/USAJobs/RemoteOK/Remotive) for job
-   postings and stores them in a local SQLite DB. No scraping, no login.
+   postings, keeps only postings from roughly the last 1-2 days (configurable;
+   some sources list postings that are actually years old), and stores them
+   in a local SQLite DB, deduped so re-running never creates duplicates. No
+   scraping, no login.
 2. **Match** — a cheap local keyword/location filter shortlists postings,
    then Claude reranks the shortlist against your parsed resume/profile and
    gives each a 0–100 fit score with reasoning.
@@ -66,7 +69,8 @@ jobbot/
   discovery/              # one module per source, all normalize to NormalizedJob
     greenhouse.py lever.py ashby.py smartrecruiters.py recruitee.py
     adzuna.py usajobs.py remoteok.py remotive.py
-    aggregate.py          # fans out, dedupes by (source, external_id), persists
+    recency.py             # parses each source's posted_at format, filters to recent postings
+    aggregate.py          # fans out, dedupes by (source, external_id), applies recency filter, persists
   resume/
     parser.py             # pdf/docx/txt -> text -> Claude -> Profile
     schema.py             # Profile pydantic model (the only source of "facts")
@@ -90,7 +94,7 @@ jobbot/
     normalize.py             # question label -> stable matching key
     store.py                  # lookup/upsert/capture against learned_answers + field_issues
                               # (fuzzy match, value_still_offerable, circuit breaker)
-  cli.py                   # typer CLI: discover / match / list / show / apply / batch / ledger / learned / resume
+  cli.py                   # typer CLI: run / discover / match / list / show / apply / batch / ledger / learned / resume
   models.py, db.py         # SQLAlchemy: Job, JobScore, Application, LearnedAnswer, ResumeProfile, FieldIssue
 tests/                    # discovery parsers + the guardrail regex, no network/browser needed
 ```
@@ -127,13 +131,22 @@ deliberately want a pre-filled *suggestion* shown to you during review.
 
 ## Usage
 
+The fastest path once setup is done — discover the last ~2 days of
+postings, score them, and apply to what clears the bar, in one command:
+
+```bash
+jobbot run --min-score 80 --limit 5
+```
+
+Or step by step:
+
 ```bash
 jobbot resume import-folder                # parse everything in config/resumes/, tag by filename
 jobbot resume list-profiles                # see each tag + how many jobs are matched to it
 
-jobbot discover              # pull new postings into the local DB
+jobbot discover              # pull new postings from the last ~2 days into the local DB
 jobbot match                 # shortlist, pick each job's best-fitting resume, Claude-score it
-jobbot list --min-score 70   # see what's worth applying to (now shows which resume too)
+jobbot list --min-score 70   # see what's worth applying to (shows matched resume + already-applied)
 jobbot show 42                # full posting + score reasoning + matched resume for job id 42
 jobbot apply 42                # open a real browser, fill it, review, confirm, submit
 jobbot batch --min-score 80 --limit 5   # do several, paced 45-180s apart, still reviewed one by one
@@ -143,12 +156,27 @@ jobbot learned forget <id>    # delete one remembered answer (e.g. you mistyped 
 jobbot learned issues          # questions that keep failing to auto-fill (circuit-broken ones)
 ```
 
-`jobbot apply`/`batch` launch a **visible** (headed) Chromium window by
-default (`JOBBOT_HEADLESS=false`) using a persistent profile stored in
+`jobbot apply`/`batch`/`run` launch a **visible** (headed) Chromium window
+by default (`JOBBOT_HEADLESS=false`) using a persistent profile stored in
 `data/browser_profile/` — so if a site ever needs a manual login, it only
 asks once. Every attempt gets a full-page screenshot in
 `data/screenshots/` and a row in the `applications` table regardless of
 whether you end up submitting.
+
+**Re-running is always safe.** `discover` dedupes postings by
+`(source, external_id)` — running it again never creates duplicate jobs.
+`batch`/`run` never re-attempt a job that already has a `submitted`
+Application on record (`jobbot list`'s `applied` column and `jobbot show`
+both surface this); `jobbot apply <id>` refuses on an already-submitted job
+unless you pass `--force`. So `jobbot run` on a schedule (cron, or
+`scripts/run_review_apply.sh`) genuinely just picks up what's new each time.
+
+**Recency:** discovery keeps only postings from roughly the last
+`search.posted_within_days` (default 2) in `settings.yaml` — some ATS APIs
+(Ashby in particular, in testing) list postings that are actually years
+old, so this isn't just a nicety. Override per run with `--days` on
+`discover`/`run`, or set it to `0` to disable and see everything a source
+currently lists.
 
 ## Memory: how it adapts across applications
 
@@ -304,13 +332,16 @@ pytest
 ```
 
 Tests cover the discovery parsers (mocked HTTP via `respx`, no network), the
-lexical shortlist scorer, the resume-profile matcher (`test_profile_select.py`),
-the multi-resume folder importer against an isolated in-memory DB
+recency filter (`test_recency.py` — real date shapes from each source, plus
+the "unparseable dates are kept, not dropped" rule), the lexical shortlist
+scorer, the resume-profile matcher (`test_profile_select.py`), the
+multi-resume folder importer against an isolated in-memory DB
 (`test_resume_multi.py`, `parse_resume` mocked so no API key is needed), the
-`Profile` schema, the learning store's normalize/fuzzy-match/upsert/circuit-
-breaker behavior (in-memory SQLite, no real DB touched), `test_fill_planner_
-guardrails.py` (every sensitive-topic form label trips the forced-human-review
-regex), and `test_browser_form_handling.py`, which is the one to trust most:
+already-applied dedup (`test_cli_dedup.py`), the `Profile` schema, the
+learning store's normalize/fuzzy-match/upsert/circuit-breaker behavior
+(in-memory SQLite, no real DB touched), `test_fill_planner_guardrails.py`
+(every sensitive-topic form label trips the forced-human-review regex), and
+`test_browser_form_handling.py`, which is the one to trust most:
 it drives a real headless Chromium against local HTML fixtures
 (`tests/fixtures/application_form.html` and `careers_page_with_iframe.html`)
 through the actual scan → fill → verify → capture pipeline `jobbot apply`

@@ -21,18 +21,22 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
     setup_logging(verbose)
 
 
-@app.command()
-def discover() -> None:
-    """Pull jobs from every configured ATS/aggregator source and store new ones."""
+def _do_discover(days: float | None) -> tuple[int, int]:
     from jobbot.discovery.aggregate import run_discovery
 
-    inserted, skipped = run_discovery()
+    return run_discovery(max_age_days=days)
+
+
+@app.command()
+def discover(
+    days: float | None = typer.Option(None, "--days", help="Only keep postings from roughly this many days back. Defaults to search.posted_within_days in settings.yaml."),
+) -> None:
+    """Pull jobs from every configured ATS/aggregator source and store new ones."""
+    inserted, skipped = _do_discover(days)
     console.print(f"[green]Discovered {inserted} new job(s)[/green], {skipped} already known.")
 
 
-@app.command()
-def match(top_n: int = typer.Option(50, help="How many lexically-shortlisted jobs to send to the LLM reranker")) -> None:
-    """Score undiscovered-but-unscored jobs against your profile."""
+def _do_match(top_n: int) -> int:
     from jobbot.matching.lexical import shortlist
     from jobbot.matching.score import score_shortlist
 
@@ -43,13 +47,54 @@ def match(top_n: int = typer.Option(50, help="How many lexically-shortlisted job
         unscored = [j for j in jobs if j.id not in scored_ids]
 
     if not unscored:
-        console.print("Nothing new to score. Run `jobbot discover` first.")
-        return
+        return 0
 
     picked = shortlist(unscored, settings_yaml, top_n=top_n)
     console.print(f"Lexically shortlisted {len(picked)} of {len(unscored)} unscored jobs; reranking with Claude...")
     score_shortlist(picked)
+    return len(picked)
+
+
+@app.command()
+def match(top_n: int = typer.Option(50, help="How many lexically-shortlisted jobs to send to the LLM reranker")) -> None:
+    """Score undiscovered-but-unscored jobs against your profile."""
+    n = _do_match(top_n)
+    if n == 0:
+        console.print("Nothing new to score. Run `jobbot discover` first.")
+        return
     console.print("[green]Done.[/green] Run `jobbot list` to see ranked results.")
+
+
+@app.command()
+def run(
+    min_score: float = typer.Option(75, help="Only apply to jobs at or above this fit score"),
+    limit: int = typer.Option(10, help="Max applications to attempt this run"),
+    top_n: int = typer.Option(50, help="How many lexically-shortlisted jobs to send to the LLM reranker"),
+    days: float | None = typer.Option(None, "--days", help="Recency filter override for discovery; defaults to search.posted_within_days in settings.yaml"),
+    auto_submit: bool = typer.Option(
+        False, help="Skip the terminal confirmation and submit automatically IF every field was filled with no human-review flags. Off by default; read the README before enabling."
+    ),
+    autofill_sensitive: bool | None = typer.Option(
+        None, help="Override JOBBOT_AUTOFILL_SENSITIVE for this run. Still requires typing CONFIRM once, before applying starts."
+    ),
+) -> None:
+    """The whole pipeline in one command: discover new postings, score them,
+    then apply to whatever clears the threshold — this is the "run it and
+    walk away" entrypoint. Every guardrail from the individual commands still
+    applies: jobs already submitted are never re-attempted (safe to re-run
+    on a schedule), nothing sensitive is auto-filled without an explicit
+    --autofill-sensitive + typed CONFIRM, and without --auto-submit each
+    application still stops for your review before it submits."""
+    console.rule("[bold]1/3 — discover[/bold]")
+    inserted, skipped = _do_discover(days)
+    console.print(f"[green]Discovered {inserted} new job(s)[/green], {skipped} already known.")
+
+    console.rule("[bold]2/3 — match[/bold]")
+    n = _do_match(top_n)
+    console.print("Nothing new to score this run." if n == 0 else f"[green]Scored {n} job(s).[/green]")
+
+    console.rule("[bold]3/3 — apply[/bold]")
+    batch(min_score=min_score, limit=limit, auto_submit=auto_submit, autofill_sensitive=autofill_sensitive)
 
 
 @app.command(name="list")
@@ -59,6 +104,7 @@ def list_jobs(
 ) -> None:
     """Show discovered jobs ranked by fit score."""
     with session_scope() as session:
+        already_submitted = _already_submitted_job_ids(session)
         rows = (
             session.execute(
                 select(Job, JobScore)
@@ -77,10 +123,12 @@ def list_jobs(
     table.add_column("ats")
     table.add_column("location")
     table.add_column("resume")
+    table.add_column("applied")
     for job, score in rows:
         table.add_row(
             str(job.id), f"{score.llm_score:.0f}", job.company, job.title,
             job.ats or "-", job.location, job.matched_profile_tag or "-",
+            "yes" if job.id in already_submitted else "",
         )
     console.print(table)
 
@@ -98,6 +146,8 @@ def show(job_id: int) -> None:
         console.print(f"Location: {job.location} (remote={job.remote})")
         console.print(f"ATS: {job.ats or 'unsupported for auto-submit'}")
         console.print(f"Matched resume: {job.matched_profile_tag or '(default profile.yaml)'}")
+        if job.id in _already_submitted_job_ids(session):
+            console.print("[yellow]Already submitted[/yellow] — see `jobbot ledger`. `jobbot apply --force` to reapply.")
         if job.score:
             console.print(f"Score: {job.score.llm_score:.0f} (lexical {job.score.lexical_score:.0f})")
             console.print(f"Reasoning: {job.score.llm_reasoning}")
@@ -201,6 +251,14 @@ def _confirm_sensitive_autofill_if_needed(override: bool | None) -> bool:
     return True
 
 
+def _already_submitted_job_ids(session) -> set[int]:
+    return set(
+        session.execute(
+            select(Application.job_id).where(Application.status == "submitted").distinct()
+        ).scalars().all()
+    )
+
+
 @app.command()
 def apply(
     job_id: int = typer.Argument(..., help="Job id from `jobbot list`"),
@@ -210,6 +268,7 @@ def apply(
     autofill_sensitive: bool | None = typer.Option(
         None, help="Override JOBBOT_AUTOFILL_SENSITIVE for this run. Still requires typing CONFIRM once. Read the README 'Guardrails' section first."
     ),
+    force: bool = typer.Option(False, help="Apply even if this job already has a submitted application on record."),
 ) -> None:
     """Open a browser, fill the application for one job, and (with your confirmation) submit it."""
     from jobbot.submit.base import apply_to_job
@@ -218,6 +277,12 @@ def apply(
         job = session.get(Job, job_id)
         if job is None:
             console.print(f"[red]No job with id {job_id}[/red]")
+            raise typer.Exit(1)
+        if not force and job.id in _already_submitted_job_ids(session):
+            console.print(
+                f"[yellow]Job {job_id} already has a submitted application on record.[/yellow] "
+                "Check `jobbot ledger`, or pass --force to apply again anyway."
+            )
             raise typer.Exit(1)
 
     confirmed_autofill = _confirm_sensitive_autofill_if_needed(autofill_sensitive)
@@ -239,9 +304,10 @@ def batch(
     ),
 ) -> None:
     """Apply to multiple supported-ATS jobs above a score threshold, one at a time,
-    with human-paced delays between each. Still stops for confirmation on every
-    application unless --auto-submit / JOBBOT_AUTO_SUBMIT=true — and even then, only
-    for applications where every field was filled with nothing flagged for review."""
+    with human-paced delays between each. Skips any job that already has a submitted
+    application on record — re-running this is always safe. Still stops for confirmation
+    on every application unless --auto-submit / JOBBOT_AUTO_SUBMIT=true — and even then,
+    only for applications where every field was filled with nothing flagged for review."""
     settings_yaml = load_search_settings()
     sub_cfg = settings_yaml.get("submission", {})
     pacing_min = sub_cfg.get("pacing_seconds_min", 45)
@@ -249,13 +315,24 @@ def batch(
     supported = set(sub_cfg.get("supported_ats", ["greenhouse", "lever"]))
 
     with session_scope() as session:
-        rows = session.execute(
-            select(Job)
-            .join(JobScore, JobScore.job_id == Job.id)
-            .where(JobScore.llm_score >= min_score, Job.ats.in_(supported))
-            .order_by(JobScore.llm_score.desc())
-            .limit(limit)
-        ).scalars().all()
+        already_submitted = _already_submitted_job_ids(session)
+        rows: list[Job] = []
+        offset = 0
+        page_size = max(limit * 2, 20)
+        while len(rows) < limit:
+            page = session.execute(
+                select(Job)
+                .join(JobScore, JobScore.job_id == Job.id)
+                .where(JobScore.llm_score >= min_score, Job.ats.in_(supported))
+                .order_by(JobScore.llm_score.desc())
+                .offset(offset)
+                .limit(page_size)
+            ).scalars().all()
+            if not page:
+                break
+            rows.extend(j for j in page if j.id not in already_submitted)
+            offset += page_size
+        rows = rows[:limit]
 
     if not rows:
         console.print("No jobs match the threshold and have a supported ATS. Try `jobbot match` first.")
