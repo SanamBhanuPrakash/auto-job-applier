@@ -99,7 +99,9 @@ def apply_to_job(
             ats_module.settle(page)
 
             fields = scan_form(form_ctx)
-            job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:2000]}"
+            # Kept short for the same reason matching/score.py truncates
+            # descriptions — Groq's free-tier 6,000 tokens/minute cap.
+            job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:800]}"
 
             with session_scope() as session:
                 matches = learning_store.match_fields(session, fields)

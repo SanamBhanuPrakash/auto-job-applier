@@ -20,7 +20,13 @@ from jobbot.resume.schema import Profile
 
 log = logging.getLogger(__name__)
 
-BATCH_SIZE = 10
+# Kept small on purpose: Groq's free tier (the default provider) caps at
+# 6,000 tokens/minute, and a batch's job descriptions dominate the prompt
+# size. This size + the 800-char description truncation below comfortably
+# fits one batch call in that budget; jobbot/llm.py retries with backoff if
+# a call still gets rate-limited. Raise it freely if you're on
+# LLM_PROVIDER=anthropic, which has no such per-minute ceiling at this scale.
+BATCH_SIZE = 4
 
 _SCORE_TOOL_SCHEMA = {
     "type": "object",
@@ -56,7 +62,7 @@ def _profile_summary(profile: Profile) -> str:
 def _batch_prompt(profile: Profile, jobs: list[Job]) -> str:
     job_blocks = []
     for job in jobs:
-        desc = (job.description or "")[:1500]
+        desc = (job.description or "")[:800]
         job_blocks.append(
             f"job_id: {job.id}\ncompany: {job.company}\ntitle: {job.title}\n"
             f"location: {job.location}\nremote: {job.remote}\ndescription: {desc}"
@@ -75,6 +81,7 @@ def _score_batch(profile: Profile, batch: list[Job], lex_by_id: dict[int, float]
         tool_name="record_scores",
         tool_description="Record the fit score and reasoning for each job in this batch.",
         input_schema=_SCORE_TOOL_SCHEMA,
+        max_tokens=1024,
     )
     by_id = {row["job_id"]: row for row in result.get("scores", [])}
 

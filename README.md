@@ -1,9 +1,10 @@
 # jobbot — local-first job discovery & assisted-application agent
 
 Pulls job postings from public ATS/aggregator APIs, ranks them against your
-resume with Claude, and drives a real browser (Playwright) to fill out
-Greenhouse and Lever application forms for you — stopping for your review
-before anything is ever submitted.
+resume with an LLM (Groq's free tier by default, Claude if you'd rather pay
+for it), and drives a real browser (Playwright) to fill out Greenhouse and
+Lever application forms for you — stopping for your review before anything
+is ever submitted.
 
 This exists because the popular "auto-apply" projects out there
 (AIHawk/JobsApplierAIAgent, GodsScion's LinkedIn bot, and friends) all
@@ -22,11 +23,11 @@ part that gets people banned.
    in a local SQLite DB, deduped so re-running never creates duplicates. No
    scraping, no login.
 2. **Match** — a cheap local keyword/location filter shortlists postings,
-   then Claude reranks the shortlist against your parsed resume/profile and
+   then the LLM reranks the shortlist against your parsed resume/profile and
    gives each a 0–100 fit score with reasoning.
 3. **Apply** — for jobs on Greenhouse or Lever (the two ATSes with clean,
-   guest-apply-friendly hosted forms), Playwright opens the real form, Claude
-   proposes a fill plan using *only* facts from your profile, every field
+   guest-apply-friendly hosted forms), Playwright opens the real form, the
+   LLM proposes a fill plan using *only* facts from your profile, every field
    gets filled and verified, and then **you** review a screenshot and the
    list of fields it left blank before typing `yes` to actually submit.
 4. **Remember** — every field it fills (or you fill) gets captured under a
@@ -109,12 +110,33 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 playwright install chromium
 
-cp .env.example .env                        # add your ANTHROPIC_API_KEY
+cp .env.example .env
 cp config/companies.example.yaml config/companies.yaml
 cp config/settings.example.yaml config/settings.yaml
 ```
 
-Then import your resume (this calls Claude once to structure it):
+**Get an LLM key.** By default this uses **Groq's free tier** — no credit
+card, sign up at [console.groq.com/keys](https://console.groq.com/keys),
+paste the key into `.env` as `GROQ_API_KEY`. This is deliberate, not just a
+cost-cutting default: Groq's account-wide policy (checked directly, not
+assumed) is that it does not train on your inputs/outputs even on the free
+tier, which matters since your resume is going through it. The one real
+trade-off is a 6,000-tokens/minute rate limit on the free tier — that's why
+`matching/score.py` batches conservatively and `jobbot/llm.py` retries
+rate-limit errors with backoff instead of failing.
+
+**A Claude.ai Pro/Max subscription does NOT work here** — that covers the
+chat app and Claude Code itself, not the separate pay-as-you-go Anthropic
+API (`api.anthropic.com`) this project would otherwise call. If you'd
+rather use Claude and don't mind its (usage-based, typically well under $1
+for a heavy day of resume-parsing + scoring + form-filling at this
+project's scale — but a real charge, unlike Groq) cost, get a key at
+[console.anthropic.com](https://console.anthropic.com), set
+`LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env` instead, and feel
+free to raise `matching/score.py`'s `BATCH_SIZE` back up since Anthropic has
+no comparable per-minute ceiling at this scale.
+
+Then import your resume (this calls the LLM once to structure it):
 
 ```bash
 jobbot resume import ~/Documents/resume.pdf

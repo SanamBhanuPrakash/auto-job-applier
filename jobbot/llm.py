@@ -1,29 +1,144 @@
-"""Shared Anthropic client helper. Every structured-output call goes through
-`call_tool`, which forces the model to respond via a single tool invocation
-so we get back JSON that matches a schema instead of parsing free text.
+"""Shared LLM client. Every structured-output call goes through `call_tool`,
+which forces the model to respond via a single tool/function invocation so
+we get back JSON that matches a schema instead of parsing free text.
+
+Two providers are supported behind this one interface — nothing else in the
+codebase (resume/parser.py, matching/score.py, submit/fill_planner.py) needs
+to know which one is active:
+
+- "groq" (default): free, no credit card, and — checked directly, not
+  assumed — does not train on inputs/outputs even on the free tier, which
+  matters here since resumes are personal data. Trade-off: a tight 6,000
+  tokens/minute limit on the free tier, which is why matching/score.py
+  batches conservatively and why 429s are retried with backoff below rather
+  than treated as fatal.
+- "anthropic": needs a separate pay-as-you-go API key (NOT covered by a
+  Claude.ai Pro/Max subscription — that covers the chat app and Claude Code
+  itself, not third-party API calls like this one). Higher quality, no
+  practical rate-limit concern for this project's scale, costs real money
+  (typically well under $1 for a heavy day of use at Anthropic's per-token
+  pricing, but it is a real charge).
+
+Set LLM_PROVIDER in .env to switch.
 """
 from __future__ import annotations
 
 import json
 import logging
-
-import anthropic
+import time
 
 from jobbot.config import get_settings
 
 log = logging.getLogger(__name__)
 
-_client: anthropic.Anthropic | None = None
+_client = None
+_client_provider: str | None = None
+
+MAX_RATE_LIMIT_RETRIES = 5
 
 
-def get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        settings = get_settings()
+def _get_client():
+    global _client, _client_provider
+    settings = get_settings()
+    provider = settings.llm_provider
+
+    if _client is not None and _client_provider == provider:
+        return _client
+
+    if provider == "groq":
+        if not settings.groq_api_key:
+            raise RuntimeError(
+                "GROQ_API_KEY is not set. Get a free key (no credit card) at "
+                "https://console.groq.com/keys and add it to .env."
+            )
+        import groq
+
+        _client = groq.Groq(api_key=settings.groq_api_key)
+    elif provider == "anthropic":
         if not settings.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set, and LLM_PROVIDER=anthropic. Note this needs a "
+                "separate pay-as-you-go API key from console.anthropic.com — a Claude.ai Pro/Max "
+                "subscription does not cover it. Add the key to .env, or set LLM_PROVIDER=groq "
+                "in .env to use Groq's free tier instead (no card needed)."
+            )
+        import anthropic
+
         _client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    else:
+        raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r}; expected 'groq' or 'anthropic'.")
+
+    _client_provider = provider
     return _client
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    return "RateLimit" in type(exc).__name__
+
+
+def _call_with_rate_limit_retry(fn):
+    delay = 2.0
+    for attempt in range(MAX_RATE_LIMIT_RETRIES):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if not _is_rate_limit_error(exc) or attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            log.warning("Rate limited (attempt %d/%d), waiting %.0fs: %s", attempt + 1, MAX_RATE_LIMIT_RETRIES, delay, exc)
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")  # loop always returns or raises
+
+
+def _call_groq(client, *, system, user_message, tool_name, tool_description, input_schema, max_tokens) -> dict:
+    settings = get_settings()
+
+    def do_call():
+        return client.chat.completions.create(
+            model=settings.groq_model,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": tool_description,
+                        "parameters": input_schema,
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": tool_name}},
+        )
+
+    response = _call_with_rate_limit_retry(do_call)
+    tool_calls = response.choices[0].message.tool_calls
+    if not tool_calls:
+        raise RuntimeError(f"Model did not call {tool_name}; got: {response.choices[0].message.content!r}")
+    return json.loads(tool_calls[0].function.arguments)
+
+
+def _call_anthropic(client, *, system, user_message, tool_name, tool_description, input_schema, max_tokens) -> dict:
+    settings = get_settings()
+
+    def do_call():
+        return client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
+            tools=[{"name": tool_name, "description": tool_description, "input_schema": input_schema}],
+            tool_choice={"type": "tool", "name": tool_name},
+        )
+
+    response = _call_with_rate_limit_retry(do_call)
+    for block in response.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            return block.input
+    raise RuntimeError(f"Model did not call {tool_name}; got: {response.content!r}")
 
 
 def call_tool(
@@ -37,25 +152,14 @@ def call_tool(
 ) -> dict:
     """Send one message, force the model to call `tool_name`, return its input dict."""
     settings = get_settings()
-    client = get_client()
+    client = _get_client()
 
-    response = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user_message}],
-        tools=[
-            {
-                "name": tool_name,
-                "description": tool_description,
-                "input_schema": input_schema,
-            }
-        ],
-        tool_choice={"type": "tool", "name": tool_name},
+    if settings.llm_provider == "groq":
+        return _call_groq(
+            client, system=system, user_message=user_message, tool_name=tool_name,
+            tool_description=tool_description, input_schema=input_schema, max_tokens=max_tokens,
+        )
+    return _call_anthropic(
+        client, system=system, user_message=user_message, tool_name=tool_name,
+        tool_description=tool_description, input_schema=input_schema, max_tokens=max_tokens,
     )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            return block.input
-
-    raise RuntimeError(f"Model did not call {tool_name}; got: {response.content!r}")

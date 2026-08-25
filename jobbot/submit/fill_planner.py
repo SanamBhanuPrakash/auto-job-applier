@@ -93,6 +93,7 @@ def build_fill_plan(profile: Profile, fields: list[FieldSpec], job_context: str)
             tool_name="record_fill_plan",
             tool_description="Record the value (or null) and needs_human flag for every field.",
             input_schema=_PLAN_TOOL_SCHEMA,
+            max_tokens=2048,
         )
 
         by_field_id = {f.field_id: f for f in llm_fields}

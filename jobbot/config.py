@@ -14,6 +14,13 @@ CONFIG_DIR = REPO_ROOT / "config"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", extra="ignore")
 
+    # "groq" (default): free, no card required — see jobbot/llm.py for why
+    # it's the default and what the tradeoffs are. "anthropic": needs a
+    # separate paid API key, not covered by a Claude.ai Pro/Max subscription.
+    llm_provider: str = "groq"
+    groq_api_key: str = ""
+    groq_model: str = "llama-3.3-70b-versatile"
+
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-5"
 
