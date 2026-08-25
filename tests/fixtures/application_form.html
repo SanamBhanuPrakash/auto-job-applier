@@ -46,6 +46,13 @@
       <li role="option">Tech Institute</li>
       <li role="option">Community College</li>
     </ul>
+    <!-- Real Greenhouse pattern (confirmed live on an Instacart posting):
+         every custom combobox ships an invisible native input purely so
+         HTML5 required-validation still fires. It must never be scanned as
+         its own fillable field — Playwright correctly refuses to interact
+         with an aria-hidden element, which turned into a ~30s hang per
+         attempt before form_scan.py excluded aria-hidden candidates. -->
+    <input required tabindex="-1" aria-hidden="true" class="decoy-required-input" value="">
   </div>
 
   <fieldset>

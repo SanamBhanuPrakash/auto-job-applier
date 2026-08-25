@@ -88,6 +88,27 @@ def test_scan_form_identifies_every_real_field_type(browser):
     page.close()
 
 
+def test_aria_hidden_decoy_sibling_is_not_scanned_as_its_own_field(browser):
+    """Regression test for a real bug found running against a live
+    Instacart/Greenhouse posting: every custom combobox there ships an
+    invisible native <input required aria-hidden="true"> sibling purely for
+    HTML5 validation, sharing the same accessible label as the real
+    combobox. The scanner used to pick it up as a second, identically-
+    labeled field; the LLM would then plan a value for it too, and
+    Playwright correctly refusing to interact with a genuinely non-
+    actionable hidden element turned into a ~30s hang per attempt
+    (confirmed live) instead of failing fast."""
+    page = browser.new_page()
+    page.goto(APPLICATION_FORM.as_uri())
+    fields = scan_form(page)
+
+    school_fields = [f for f in fields if f.label.strip() == "School"]
+    assert len(school_fields) == 1
+    assert school_fields[0].field_type == "combobox"
+
+    page.close()
+
+
 def test_sensitive_guardrail_matches_real_scanned_labels(browser):
     """The guardrail regex is unit-tested against hand-written strings
     elsewhere (test_fill_planner_guardrails.py); this confirms it also

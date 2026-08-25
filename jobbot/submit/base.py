@@ -227,7 +227,17 @@ def apply_to_job(
                 session.add(app)
             return app
         finally:
-            context.close()
+            # If the browser/context already died (crashed, or Playwright's
+            # own action timeouts cascaded into it becoming unresponsive —
+            # see the caller for why that can happen), closing it can itself
+            # raise. That must never mask the real outcome above: the
+            # `except` block already recorded status="error" and returned
+            # cleanly, and a second exception from cleanup here would
+            # otherwise replace that return and crash the whole call.
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                log.debug("context.close() failed (already closed) — ignoring", exc_info=True)
 
 
 def apply_to_jobs(

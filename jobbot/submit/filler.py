@@ -27,24 +27,33 @@ def re_search_resume(label: str) -> bool:
     return "resume" in label or "cv" in label
 
 
+# Playwright's default action timeout is 30s per call — fine for normal
+# rendering delays, disastrous for a genuinely non-actionable element (a
+# real one slipped past form_scan.py once already, see
+# test_aria_hidden_decoy_sibling_is_not_scanned_as_its_own_field). Failing
+# fast here means a bad field costs a few seconds via the existing
+# retry-once in apply_fill_plan, not the 30s+ stacked hangs observed live.
+_ACTION_TIMEOUT_MS = 5000
+
+
 def apply_field(page: FrameLike, spec: FieldSpec, value: str) -> None:
     loc = locate(page, spec)
 
     if spec.field_type in ("text", "email", "tel", "url", "number", "textarea"):
-        loc.fill(value)
+        loc.fill(value, timeout=_ACTION_TIMEOUT_MS)
 
     elif spec.field_type == "select":
         try:
-            loc.select_option(label=value)
+            loc.select_option(label=value, timeout=_ACTION_TIMEOUT_MS)
         except Exception:
             log.warning("Could not select option %r for field %r; leaving as-is", value, spec.label)
 
     elif spec.field_type == "checkbox":
         truthy = value.strip().lower() in ("true", "yes", "1", "on", "checked")
         if truthy:
-            loc.check()
+            loc.check(timeout=_ACTION_TIMEOUT_MS)
         else:
-            loc.uncheck()
+            loc.uncheck(timeout=_ACTION_TIMEOUT_MS)
 
     elif spec.field_type == "radio":
         # spec's locator matches every input in the group; pick the one whose
@@ -55,17 +64,17 @@ def apply_field(page: FrameLike, spec: FieldSpec, value: str) -> None:
             option = options.nth(i)
             label_text = (option.evaluate(RADIO_OPTION_LABEL_JS) or "").strip()
             if value.strip().lower() in label_text.lower():
-                option.check()
+                option.check(timeout=_ACTION_TIMEOUT_MS)
                 return
         log.warning("No radio option matched %r for field %r", value, spec.label)
 
     elif spec.field_type == "combobox":
-        loc.click()
-        loc.fill(value)
+        loc.click(timeout=_ACTION_TIMEOUT_MS)
+        loc.fill(value, timeout=_ACTION_TIMEOUT_MS)
         page.wait_for_timeout(300)  # let the async option list render
         option = page.locator('[role="option"]', has_text=value).first
         if option.count() > 0:
-            option.click()
+            option.click(timeout=_ACTION_TIMEOUT_MS)
         else:
             log.warning("Combobox %r: no option matched %r, leaving open", spec.label, value)
 

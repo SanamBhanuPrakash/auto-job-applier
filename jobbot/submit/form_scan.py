@@ -60,6 +60,16 @@ _SCAN_JS = """
   );
 
   candidates.forEach((el) => {
+    // react-aria/Radix-style custom widgets (Greenhouse's newer comboboxes
+    // among them) pair the real interactive control with an invisible
+    // native <input required aria-hidden="true" tabindex="-1"> sibling
+    // that exists purely so native HTML5 validation still fires — it is
+    // never meant to be interacted with. Without this, the scanner
+    // duplicated every such field under the same label, and Playwright
+    // correctly refusing to fill a non-actionable hidden element turned
+    // into a ~30s timeout per attempt (confirmed live on a real Greenhouse
+    // form: every combobox had exactly this sibling).
+    if (el.getAttribute('aria-hidden') === 'true') return;
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || tag).toLowerCase();
 
