@@ -1,10 +1,11 @@
 """Orchestrates one application attempt end to end:
 
   pick profile (per-job matched resume, or the global default) -> open
-  browser -> scan form -> resolve learned/circuit-broken fields -> LLM fill
-  plan for the rest -> fill+verify -> screenshot -> human review -> (only on
-  explicit "yes", or auto_submit) -> submit -> capture what was learned ->
-  log
+  browser -> scan form -> resolve static/learned/circuit-broken fields ->
+  LLM fill plan for the rest -> fill+verify -> screenshot -> human review ->
+  submit (auto_submit clicks it itself; otherwise watches the browser for
+  you to click it yourself, or close the window to skip) -> capture what
+  was learned -> log
 
 Uses a persistent browser profile (launch_persistent_context) so cookies and
 any manual login you do survive between runs, per the research's note that a
@@ -28,7 +29,7 @@ from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
-from jobbot.submit.review import confirm_already_closed_browser, confirm_submit, show_review
+from jobbot.submit.review import show_review, wait_for_submit_or_close
 from jobbot.submit.static_answers import resolve_static_fields
 
 log = logging.getLogger(__name__)
@@ -61,38 +62,19 @@ def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
     return Profile.model_validate(load_profile_raw()), settings.jobbot_resume_path
 
 
-def _looks_like_closed_target(exc: Exception) -> bool:
-    return "has been closed" in str(exc) or "Target closed" in str(exc)
-
-
-def _resolve_submit_status(page, form_ctx, ats_module, job: Job, *, auto_submit: bool) -> tuple[str, str]:
-    """Attempts the actual submit click and decides the outcome, including
-    the case where the browser is already gone by the time we get here.
-
-    Real failure mode hit live: the review step leaves the browser open so
-    you can fill remaining fields and click the real Submit button
-    yourself if you'd rather — if you then close the window, by the time
-    this runs `page.is_closed()` is already True, or the click raises
-    "Target page, context or browser has been closed." Blindly recording
-    that as status="error" left the job stuck there forever, and
-    `apply-all` retries every non-"submitted" job every run — so it kept
-    reopening a browser for a job you'd already applied to. In the
-    interactive (non-auto_submit) case, ask what actually happened instead
-    of guessing either way. Skipped for auto_submit: there's no one there
-    to answer, so it falls back to the old crash-safe "error" behavior.
-    """
+def _resolve_auto_submit_status(page, form_ctx, ats_module, job: Job) -> tuple[str, str]:
+    """Only ever called when auto_submit is on — there's no one watching an
+    unattended run, so a browser that's already gone by the time we get
+    here is unambiguously an error, never a question to ask (contrast with
+    the interactive path, which never blindly clicks at all — see
+    review.wait_for_submit_or_close)."""
     if page.is_closed():
-        if auto_submit:
-            return "error", "Browser window closed before Submit could be clicked."
-        return ("submitted", "") if confirm_already_closed_browser(job) else ("skipped", "")
-
+        return "error", "Browser window closed before Submit could be clicked."
     try:
         ats_module.click_submit(form_ctx)
         page.wait_for_timeout(2000)
         return "submitted", ""
     except Exception as exc:  # noqa: BLE001
-        if not auto_submit and _looks_like_closed_target(exc):
-            return ("submitted", "") if confirm_already_closed_browser(job) else ("skipped", "")
         log.exception("Submit click failed for job %d", job.id)
         return "error", str(exc)
 
@@ -236,22 +218,22 @@ def apply_to_job(
                 )
                 auto_submit = False
 
-            should_submit = auto_submit or confirm_submit(job)
-
-            # Capture whatever ended up in the form (auto-filled or typed by
-            # you) before the submit click potentially navigates the page
-            # away, so the next application to ask the same question already
-            # knows the answer. Skipped if the browser's already gone —
-            # nothing to read, and reading would just raise the same way
-            # click_submit below is guarded against.
-            if not page.is_closed():
-                with session_scope() as session:
-                    learning_store.capture_from_page(session, form_ctx, fields)
-
-            if should_submit:
-                status, error = _resolve_submit_status(page, form_ctx, ats_module, job, auto_submit=auto_submit)
+            if auto_submit:
+                # Capture whatever ended up in the form before the submit
+                # click potentially navigates the page away, so the next
+                # application to ask the same question already knows the
+                # answer. Skipped if the browser's already gone — nothing to
+                # read, and reading would just raise the same way
+                # click_submit below is guarded against.
+                if not page.is_closed():
+                    with session_scope() as session:
+                        learning_store.capture_from_page(session, form_ctx, fields)
+                status, error = _resolve_auto_submit_status(page, form_ctx, ats_module, job)
             else:
-                status, error = "filled_pending_review", ""
+                # No terminal prompt: watches the browser for you clicking
+                # Submit yourself (or closing the window to skip this one),
+                # capturing form state along the way.
+                status, error = wait_for_submit_or_close(page, form_ctx, ats_module, job, fields), ""
 
             with session_scope() as session:
                 app = session.get(Application, app_id)

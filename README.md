@@ -386,11 +386,15 @@ trust it.
    `discover` and `match`, apply manually to whatever scores well. Zero
    platform-ToS risk, useful on its own.
 2. **Assisted, reviewed submission** (the default) — `apply`/`batch` fill
-   the form and wait for your typed `yes`.
-3. **Batch auto-submit** — `--auto-submit` / `JOBBOT_AUTO_SUBMIT=true`
-   skips the per-application confirmation, but *only* submits an
-   application where every field was filled with nothing flagged for
-   review; anything with a `needs_human` field still stops. Combine with
+   the form and open the browser for you. No terminal prompt: click the
+   real Submit button on the page yourself (or close the window to skip
+   this one) and the tool notices and moves on to the next application —
+   see `jobbot/submit/review.py`'s `wait_for_submit_or_close`.
+3. **Batch auto-submit** — `--auto-submit` / `JOBBOT_AUTO_SUBMIT=true` has
+   the tool click Submit itself instead of waiting for you, but *only* for
+   an application where every field was filled with nothing flagged for
+   review; anything with a `needs_human` field still stops for you. Combine
+   with
    `--autofill-sensitive` / `JOBBOT_AUTOFILL_SENSITIVE=true` (one `CONFIRM`
    per run, not per application — see "Memory" above) once you trust the
    saved answers, and a `batch` run really can go end-to-end unattended
