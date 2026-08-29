@@ -1,9 +1,10 @@
 # jobbot — local-first job discovery & assisted-application agent
 
 Pulls job postings from public ATS/aggregator APIs, ranks them against your
-resume with Claude, and drives a real browser (Playwright) to fill out
-Greenhouse and Lever application forms for you — stopping for your review
-before anything is ever submitted.
+resume with an LLM (Groq's free tier by default, Claude if you'd rather pay
+for it), and drives a real browser (Playwright) to fill out Greenhouse and
+Lever application forms for you — stopping for your review before anything
+is ever submitted.
 
 This exists because the popular "auto-apply" projects out there
 (AIHawk/JobsApplierAIAgent, GodsScion's LinkedIn bot, and friends) all
@@ -16,19 +17,29 @@ part that gets people banned.
 ## What this does
 
 1. **Discover** — polls public, keyless JSON APIs (Greenhouse, Lever, Ashby,
-   SmartRecruiters, Recruitee, plus Adzuna/USAJobs/RemoteOK/Remotive) for job
-   postings, keeps only postings from roughly the last 1-2 days (configurable;
-   some sources list postings that are actually years old), and stores them
-   in a local SQLite DB, deduped so re-running never creates duplicates. No
-   scraping, no login.
+   SmartRecruiters, Recruitee, Workday, plus Adzuna/USAJobs/RemoteOK/Remotive)
+   for job postings, keeps only postings from roughly the last month by
+   default (configurable via `posted_within_days`; some sources list
+   postings that are actually years old — Ashby in particular, still
+   ~91%-filtered even at a 30-day window — while others like RemoteOK/
+   Remotive don't re-timestamp daily and were measured live losing
+   essentially 100% of their results to a tighter 2-day window, which is
+   why 30 is the default rather than 2), and stores them in a local SQLite
+   DB, deduped so re-running never creates duplicates. No scraping, no login.
 2. **Match** — a cheap local keyword/location filter shortlists postings,
-   then Claude reranks the shortlist against your parsed resume/profile and
+   then the LLM reranks the shortlist against your parsed resume/profile and
    gives each a 0–100 fit score with reasoning.
 3. **Apply** — for jobs on Greenhouse or Lever (the two ATSes with clean,
-   guest-apply-friendly hosted forms), Playwright opens the real form, Claude
-   proposes a fill plan using *only* facts from your profile, every field
+   guest-apply-friendly hosted forms), Playwright opens the real form, the
+   LLM proposes a fill plan using *only* facts from your profile, every field
    gets filled and verified, and then **you** review a screenshot and the
-   list of fields it left blank before typing `yes` to actually submit.
+   list of fields it left blank before typing `yes` to actually submit. Open-
+   ended questions ("Why do you want to work here?") get a real, specific
+   answer grounded in the job context and your actual background — not left
+   blank, and written to read like a person wrote it (varied phrasing,
+   concrete details, none of the "As a passionate..." tells) rather than
+   obvious template filler. See `jobbot/submit/fill_planner.py`'s system
+   prompt for exactly what "specific, not generic" means here.
 4. **Remember** — every field it fills (or you fill) gets captured under a
    normalized version of its question text. The next application that asks
    the same thing — even worded differently ("Are you authorized to work in
@@ -67,7 +78,7 @@ part that gets people banned.
 config/                  # your personal, gitignored config (copy the .example files)
 jobbot/
   discovery/              # one module per source, all normalize to NormalizedJob
-    greenhouse.py lever.py ashby.py smartrecruiters.py recruitee.py
+    greenhouse.py lever.py ashby.py smartrecruiters.py recruitee.py workday.py
     adzuna.py usajobs.py remoteok.py remotive.py
     recency.py             # parses each source's posted_at format, filters to recent postings
     aggregate.py          # fans out, dedupes by (source, external_id), applies recency filter, persists
@@ -107,6 +118,53 @@ jobbot/
 tests/                    # discovery parsers + the guardrail regex, no network/browser needed
 ```
 
+## Discovery coverage: India + worldwide remote
+
+`config/companies.example.yaml` ships with ~50 companies, every slug
+confirmed live (not guessed) against each ATS's API right before being
+added, including several with substantial India-specific hiring (CRED and
+Meesho's Lever boards are majority-India; HighRadius, PhonePe, MongoDB,
+Databricks, Okta, GitLab all have real India-based roles among their
+listings). Be aware of a real limit here: most large India-founded
+unicorns use an ATS this project doesn't talk to — Darwinbox, Keka,
+Turbohire, or an in-house system — not Greenhouse/Lever/Ashby/
+SmartRecruiters/Recruitee, so a long list of well-known Indian company
+names was checked while building this and came back empty for exactly that
+reason. Company-board discovery alone gets you real but modest India
+volume (confirmed on a live run: ~170 India-tagged postings out of ~1,700
+discovered).
+
+**Adzuna is the bigger lever for India (and worldwide remote) volume**,
+because it searches *across* many employer sites and boards by city rather
+than needing one entry per employer here. It's free but needs its own
+signup (`developer.adzuna.com`, no cost, 1000 calls/month) — set
+`ADZUNA_APP_ID`/`ADZUNA_APP_KEY` in `.env` and `aggregators.adzuna.enabled:
+true` in `settings.yaml`. Confirmed live that Adzuna covers India plus 17
+other countries (US/UK/Canada/Australia/Germany/France/Spain/Italy/
+Netherlands/Austria/Belgium/Brazil/Mexico/New Zealand/Poland/Singapore/
+South Africa) — `settings.example.yaml`'s `aggregators.adzuna.queries` is
+pre-filled with one search per major Indian city (Bangalore, Hyderabad,
+Mumbai, Pune, Delhi NCR, Chennai, Kerala) plus remote-US and remote-UK;
+add, remove, or repoint rows freely, each is one extra API call per
+`jobbot discover`. RemoteOK and Remotive (no signup needed, already
+enabled by default) round out worldwide-remote coverage but have no
+India-specific filter of their own — `aggregators.remoteok.tags` /
+`.remotive.categories` both take a list now (one entry per domain your
+resumes span) instead of a single tag, so multi-resume setups aren't
+narrowed to whatever the first resume happened to search for.
+
+`search.locations` in `settings.example.yaml` now includes Bangalore/
+Bengaluru/Hyderabad/Mumbai/Pune/Noida/Delhi/Gurgaon/Chennai/Kerala/Kochi
+alongside "remote" — this is the cheap lexical pre-filter that runs before
+LLM scoring (`jobbot/matching/lexical.py`); a posting located in one of
+these cities scores 0 on the location component otherwise, even though the
+later per-resume LLM scoring would judge it correctly on its own. Known,
+not-yet-fixed limitation: that lexical filter's `keywords` list is global,
+not per-resume — with multiple resumes spanning different domains
+(frontend vs. cloud vs. data science, say), it runs once before any
+per-resume matching happens, so keep it broad rather than narrowly backend-
+specific if you're relying on `config/resumes/`.
+
 ## Setup
 
 Requires Python 3.11+.
@@ -117,12 +175,48 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 playwright install chromium
 
-cp .env.example .env                        # add your ANTHROPIC_API_KEY
+cp .env.example .env
 cp config/companies.example.yaml config/companies.yaml
 cp config/settings.example.yaml config/settings.yaml
 ```
 
-Then import your resume (this calls Claude once to structure it):
+**Get an LLM key.** By default this uses **Groq's free tier** — no credit
+card, sign up at [console.groq.com/keys](https://console.groq.com/keys),
+paste the key into `.env` as `GROQ_API_KEY`. This is deliberate, not just a
+cost-cutting default: Groq's account-wide policy (checked directly, not
+assumed) is that it does not train on your inputs/outputs even on the free
+tier, which matters since your resume is going through it. The one real
+trade-off is a 6,000-tokens/minute rate limit on the free tier — that's why
+`matching/score.py` batches conservatively and `jobbot/llm.py` retries
+rate-limit errors with backoff instead of failing.
+
+**Have a Google AI subscription and want to use Gemini instead?** A Google
+AI Pro/Ultra subscription is a separate consumer product from the Gemini
+API and doesn't grant API access either (checked directly — same gap as
+Claude Pro not covering the Anthropic API). You still need a free API key
+from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no
+card required), then set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` in
+`.env`. Roomier free-tier limits than Groq (250k tokens/minute vs. 6k as of
+the 3.7 Flash generation) — but weigh this: Gemini's free tier terms let
+Google use your inputs/outputs to improve their models, which Groq's free
+tier explicitly does not, and your resume is what's going through it. If
+that trade-off doesn't sit right, enabling Cloud Billing on the same key
+removes that clause (and raises the limits further) for a small per-token
+cost — or just stick with Groq.
+
+**A Claude.ai Pro/Max subscription does NOT work here** — that covers the
+chat app and Claude Code itself, not the separate pay-as-you-go Anthropic
+API (`api.anthropic.com`) this project would otherwise call. If you'd
+rather use Claude and don't mind its (usage-based, typically well under $1
+for a heavy day of resume-parsing + scoring + form-filling at this
+project's scale — but a real charge, unlike Groq/Gemini's free tiers)
+cost, get a key at
+[console.anthropic.com](https://console.anthropic.com), set
+`LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY` in `.env` instead, and feel
+free to raise `matching/score.py`'s `BATCH_SIZE` back up since Anthropic has
+no comparable per-minute ceiling at this scale.
+
+Then import your resume (this calls the LLM once to structure it):
 
 ```bash
 jobbot resume import ~/Documents/resume.pdf
@@ -158,6 +252,7 @@ jobbot list --min-score 70   # see what's worth applying to (shows matched resum
 jobbot show 42                # full posting + score reasoning + matched resume for job id 42
 jobbot apply 42                # open a real browser, fill it, review, confirm, submit
 jobbot batch --min-score 80 --limit 5   # do several, paced 45-180s apart, still reviewed one by one
+jobbot apply-all --min-score 60         # same thing, named for what people actually ask for — no job IDs to type, limit defaults to 500
 jobbot ledger                # what you've actually submitted, and when
 jobbot learned list           # what it's remembered so far, and how often each answer's been reused
 jobbot learned forget <id>    # delete one remembered answer (e.g. you mistyped it once)
@@ -369,15 +464,55 @@ trust it.
    `discover` and `match`, apply manually to whatever scores well. Zero
    platform-ToS risk, useful on its own.
 2. **Assisted, reviewed submission** (the default) — `apply`/`batch` fill
-   the form and wait for your typed `yes`.
-3. **Batch auto-submit** — `--auto-submit` / `JOBBOT_AUTO_SUBMIT=true`
-   skips the per-application confirmation, but *only* submits an
-   application where every field was filled with nothing flagged for
-   review; anything with a `needs_human` field still stops. Combine with
+   the form and open the browser for you. No terminal prompt: click the
+   real Submit button on the page yourself (or close the window to skip
+   this one) and the tool notices and moves on to the next application —
+   see `jobbot/submit/review.py`'s `wait_for_submit_or_close`.
+3. **Batch auto-submit** — `--auto-submit` / `JOBBOT_AUTO_SUBMIT=true` has
+   the tool click Submit itself instead of waiting for you, but *only* for
+   an application where every field was filled with nothing flagged for
+   review; anything with a `needs_human` field still stops for you. Combine
+   with
    `--autofill-sensitive` / `JOBBOT_AUTOFILL_SENSITIVE=true` (one `CONFIRM`
    per run, not per application — see "Memory" above) once you trust the
    saved answers, and a `batch` run really can go end-to-end unattended
    after that one confirmation.
+
+**Why there's still a human click, even in Stage 3.** Researched this
+directly rather than assuming it: Simplify Copilot — the best-known
+browser-extension autofill tool, and the one most often held up as "how the
+good ones do it" — never submits for you either, on any tier, including its
+paid "auto apply" one. You still click Submit yourself on every single
+application; it only speeds up the filling. Reported field-matching
+accuracy on some ATS platforms (iCIMS/Taleo) runs ~40-50%, and Reddit/Blind
+threads on fully-unattended "apply while you sleep" bots describe real
+platform bans, per-company blacklisting from over-applying, and rejection
+history that follows a candidate indefinitely once an ATS has it on file —
+the exact risk this project's own design has avoided since the first
+commit. That's not a gap in this tool that a smarter model would close; a
+2025 form-filling benchmark (FormFactory, arXiv:2506.01520) found the task
+still resists even state-of-the-art multimodal LLMs. The honest reading:
+the tools that "just work" unattended don't exist yet, anywhere, including
+outside this project — what exists is faster, more reliable *filling*,
+which is a different thing than removing the final check, and is exactly
+what Stage 3 plus the fast path below already gets you as close to as is
+real.
+
+**The Simplify-style fast path.** Simplify's core autofill isn't LLM-driven
+at all — it's a fixed taxonomy of common field labels (name, email, phone,
+links, current job, school) fuzzy-matched onto a stored profile, with AI
+reserved for genuinely novel free-text questions. `jobbot/submit/
+static_answers.py` does the same thing here: before a single field goes to
+the LLM, ~15 near-universal fields (first/last/full name, email, phone,
+LinkedIn/GitHub/portfolio, current company/title, school/degree, desired
+salary, willing-to-relocate, location) are resolved directly from
+`profile.yaml` — no API call, no rate-limit exposure, and strictly more
+reliable than an LLM guess since it's a literal profile lookup, not an
+inference. Combined with `learning_store`'s remembered answers (built up
+from your own past applications) and Stage 3 above, a well-filled profile
+means an increasing share of applications end up with an empty
+`needs_human` list — those are exactly the ones `--auto-submit` sends
+through with no prompt at all.
 
 Other things baked in rather than left to a prompt:
 - Randomized pacing (`pacing_seconds_min/max` in `settings.yaml`) between
@@ -391,17 +526,85 @@ Other things baked in rather than left to a prompt:
   `companies.yaml` — there's no enumeration endpoint, and it keeps discovery
   scoped to employers you actually chose.
 
-## Extending to more ATSes
+## Extending to more ATSes / sites
 
-`Ashby`, `SmartRecruiters`, and `Recruitee` are already wired up for
-*discovery* (see `config/companies.example.yaml`) but not for *submission* —
-`job.ats` is left empty for them, so `jobbot apply` will refuse with "no
-submission handler" rather than guess. To add one, look at
+`Ashby`, `SmartRecruiters`, `Recruitee`, and `Workday` are already wired up
+for *discovery* (see `config/companies.example.yaml`) but not for
+*submission* — `job.ats` is left empty for them, so `jobbot apply` will
+refuse with "no submission handler" rather than guess. To add one, look at
 `jobbot/submit/lever.py` as the minimal template (just a form-ready wait and
 a submit-button selector — the generic scanner/filler handle the rest) and
 `jobbot/submit/greenhouse.py` for a platform with non-native dropdowns.
-Workday is explicitly out of scope here — the research this was built from
-flags it as needing a vision-LLM approach, not a static-selector one.
+
+**Workday: discovery works well, submission doesn't, and the reason isn't
+what you'd guess.** Its job-listing API (`POST .../wday/cxs/<tenant>/<site>/
+jobs`) needs no auth at all and was confirmed live across four unrelated
+employers (Automation Anywhere, Workday itself, BD's India-specific career
+site, Yahoo) — `jobbot/discovery/workday.py` uses it, and
+`config/companies.example.yaml`'s `workday:` list takes a full careers URL
+per employer since (unlike Greenhouse/Lever) there's no single guessable
+slug. Submission is a different story: clicking "Apply" on a real posting
+goes straight to a Workday Sign In wall — confirmed live, not assumed from
+Workday's DOM-complexity reputation — meaning it needs a candidate account
+per employer tenant, the same category as Wellfound/Cutshort below, not a
+harder-but-doable DOM-scanning problem. It's also worth being upfront that
+solving the login wall wouldn't be the end of it: Workday's real apply flow
+is a multi-step wizard (personal info -> experience -> voluntary
+disclosures -> review -> submit) across several page navigations, not the
+single page Greenhouse/Lever forms are. `jobbot/submit/base.py` and
+`filler.py` are built around one scan-fill-verify-submit pass; multi-step
+support would mean a per-employer-tenant login step plus a loop that
+re-scans and re-fills after each "Next," which is a materially bigger
+submission module than greenhouse.py/lever.py, not an incremental change to
+either.
+
+**SmartRecruiters was checked and ruled out for submission, not just left
+undone.** Its application-submission page
+(`jobs.smartrecruiters.com/oneclick-ui/...`) is protected by DataDome, a
+commercial anti-bot/CAPTCHA service — confirmed live against two unrelated
+companies' postings (SmartRecruiters' own careers page and a Sandisk
+posting), so it's a platform-wide protection on the submit flow, not one
+employer's configuration. The read-only job-listing pages have no such
+protection, which is why discovery still works fine. Building around a
+deployed CAPTCHA would mean either a CAPTCHA-solving service or some other
+detection-evasion technique — not something this project does, for the same
+reason it doesn't automate LinkedIn/Indeed.
+
+**Wellfound and Cutshort were also checked, not assumed.** Both require a
+logged-in account to apply at all (there's no guest-apply hosted form the
+way Greenhouse/Lever have) — Wellfound's own Terms explicitly warn against
+automating past the manual apply click, and both platforms are the kind of
+authenticated, account-based service where automated traffic risks the
+account, the same category as LinkedIn/Indeed. Neither is implemented here,
+for the same reason those aren't.
+
+**MyGreenhouse (`my.greenhouse.io`) — the unified candidate-account layer
+that browses jobs across hundreds of Greenhouse customers with one login —
+was checked too, precisely because it's easy to confuse with the
+per-employer hosted forms this project *does* automate.** They're different
+products with different rules. The guest-apply hosted forms
+(`job-boards.greenhouse.io/<company>/...`) have no account and no
+anti-automation clause — that's what's implemented. MyGreenhouse is a
+separate, login-gated product, and its own User Agreement explicitly
+prohibits it: *"using automated means, including spiders, robots, crawlers,
+or similar means or processes to access or use the Services"*
+([my.greenhouse.io/users/agreement](https://my.greenhouse.io/users/agreement)).
+Not implemented, for the same reason Wellfound/Cutshort aren't — this one
+just happens to share a company name with the ATS this project does
+automate, which is exactly why it's worth spelling out instead of leaving
+ambiguous.
+
+**Wellfound and Cutshort were also checked, not assumed.** Both require a
+logged-in account to apply at all (there's no guest-apply hosted form the
+way Greenhouse/Lever have) — Wellfound's own Terms explicitly warn against
+automating past the manual apply click, and both platforms are the kind of
+authenticated, account-based service where automated traffic risks the
+account, the same category as LinkedIn/Indeed. Neither is implemented here,
+for the same reason those aren't.
+
+None of this rules out *discovery* for platforms with public listings —
+just automated *submission* where a site has specifically defended against
+it (technically, contractually, or both).
 
 ## Testing
 

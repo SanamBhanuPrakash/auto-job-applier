@@ -1,29 +1,279 @@
-"""Shared Anthropic client helper. Every structured-output call goes through
-`call_tool`, which forces the model to respond via a single tool invocation
-so we get back JSON that matches a schema instead of parsing free text.
+"""Shared LLM client. Every structured-output call goes through `call_tool`,
+which forces the model to respond via a single tool/function invocation so
+we get back JSON that matches a schema instead of parsing free text.
+
+Three providers are supported behind this one interface — nothing else in
+the codebase (resume/parser.py, matching/score.py, submit/fill_planner.py)
+needs to know which one is active:
+
+- "groq" (default): free, no credit card, and — checked directly, not
+  assumed — does not train on inputs/outputs even on the free tier, which
+  matters here since resumes are personal data. Trade-off: a tight 6,000
+  tokens/minute limit on the free tier, which is why matching/score.py
+  batches conservatively and why 429s are retried with backoff below rather
+  than treated as fatal.
+- "gemini": also free with no credit card, via a Google AI Studio API key —
+  note this is NOT the same thing as a Google AI Pro/Ultra subscription,
+  which is a separate consumer product and does not grant API access either
+  (checked directly; same category of gap as Claude.ai Pro not covering the
+  Anthropic API). Roomier free-tier limits than Groq (250k tokens/minute vs.
+  6k, as of the 3.7 Flash generation), but its free tier's terms allow
+  Google to use your inputs/outputs to improve their models — Groq's
+  free tier explicitly does not. Worth weighing given resumes are personal
+  data; enabling Cloud Billing on the same key removes that clause (and
+  raises the rate limits further) if you'd rather pay a little.
+- "anthropic": needs a separate pay-as-you-go API key (NOT covered by a
+  Claude.ai Pro/Max subscription — that covers the chat app and Claude Code
+  itself, not third-party API calls like this one). Higher quality, no
+  practical rate-limit concern for this project's scale, costs real money
+  (typically well under $1 for a heavy day of use at Anthropic's per-token
+  pricing, but it is a real charge).
+
+Set LLM_PROVIDER in .env to switch.
 """
 from __future__ import annotations
 
 import json
 import logging
-
-import anthropic
+import time
 
 from jobbot.config import get_settings
 
 log = logging.getLogger(__name__)
 
-_client: anthropic.Anthropic | None = None
+_clients: dict[str, object] = {}
+
+MAX_RATE_LIMIT_RETRIES = 5
+
+# Providers whose free tier can be used as an automatic fallback when the
+# configured one hits its daily quota (see call_tool below). "anthropic" is
+# deliberately excluded — it's pay-as-you-go, and silently routing a run
+# onto a paid provider without explicit consent just because a free one ran
+# dry is not a call this code gets to make on the user's behalf.
+_FREE_FALLBACK_ORDER = ["groq", "gemini"]
 
 
-def get_client() -> anthropic.Anthropic:
-    global _client
-    if _client is None:
-        settings = get_settings()
+def _get_client(provider: str | None = None):
+    settings = get_settings()
+    provider = provider or settings.llm_provider
+
+    if provider in _clients:
+        return _clients[provider]
+
+    if provider == "groq":
+        if not settings.groq_api_key:
+            raise RuntimeError(
+                "GROQ_API_KEY is not set. Get a free key (no credit card) at "
+                "https://console.groq.com/keys and add it to .env."
+            )
+        import groq
+
+        client = groq.Groq(api_key=settings.groq_api_key)
+    elif provider == "gemini":
+        if not settings.gemini_api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY is not set. Note a Google AI Pro/Ultra subscription does NOT "
+                "cover this — get a free API key (separate, no credit card) at "
+                "https://aistudio.google.com/apikey and add it to .env."
+            )
+        from google import genai
+        from google.genai import types
+
+        # Confirmed live: with no timeout set, a single dropped/reset TCP
+        # connection to Google's API left a call hanging indefinitely
+        # (eventually surfaced a raw WinError 10053 after several minutes)
+        # instead of failing fast so the retry/fallback logic in
+        # call_tool() could act on it. 60s is generous for a single
+        # tool-call request of this size.
+        client = genai.Client(api_key=settings.gemini_api_key, http_options=types.HttpOptions(timeout=60000))
+    elif provider == "anthropic":
         if not settings.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.")
-        _client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    return _client
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY is not set, and LLM_PROVIDER=anthropic. Note this needs a "
+                "separate pay-as-you-go API key from console.anthropic.com — a Claude.ai Pro/Max "
+                "subscription does not cover it. Add the key to .env, or set LLM_PROVIDER=groq "
+                "in .env to use Groq's free tier instead (no card needed)."
+            )
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    else:
+        raise RuntimeError(f"Unknown LLM_PROVIDER {provider!r}; expected 'groq', 'gemini', or 'anthropic'.")
+
+    _clients[provider] = client
+    return client
+
+
+def _provider_has_key(settings, provider: str) -> bool:
+    return bool(getattr(settings, f"{provider}_api_key", ""))
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    # Anthropic/Groq (OpenAI-shaped SDKs) raise a distinctly-named RateLimitError.
+    if "RateLimit" in type(exc).__name__:
+        return True
+    # google-genai instead raises ClientError for every 4xx, with the real
+    # status on .code — verified against the installed SDK's error classes,
+    # not assumed, since guessing wrong here silently disables retry for it.
+    code = getattr(exc, "code", None)
+    return code == 429
+
+
+class DailyQuotaExceeded(RuntimeError):
+    """A provider's separate per-day (not per-minute) token/request budget was hit."""
+
+
+def _is_daily_quota_error(exc: BaseException) -> bool:
+    """A 429 for hitting a per-minute token/request limit clears in seconds
+    and is worth retrying. A 429 for hitting Groq's separate per-MODEL
+    per-DAY token budget (confirmed live: `openai/gpt-oss-120b`'s free tier
+    caps at 200,000 tokens/day, independent of the per-minute limit) can
+    say "please try again in 17m43s" — retrying that with a few seconds of
+    backoff just burns the whole retry budget and then fails anyway with a
+    confusing stack trace. Detected by the wording Groq's own error message
+    uses ("tokens per day" / "requests per day"), so it fails fast instead
+    with a clear, actionable message.
+    """
+    message = str(exc).lower()
+    return "per day" in message or "tpd" in message or "rpd" in message
+
+
+def _is_malformed_tool_call_error(exc: BaseException) -> bool:
+    """Groq occasionally generates tool-call arguments that aren't valid
+    JSON — confirmed live scoring a 1200-job batch: a stray quote
+    (`"job_id":2523","score":30`) broke server-side parsing and Groq
+    rejected the whole request with a 400 'tool_use_failed' instead of ever
+    handing us the broken string to fix ourselves. This is a one-off
+    generation glitch (a fresh generation is usually well-formed), not a
+    bad request on our end, so it's worth an immediate retry rather than
+    crashing an entire — possibly hours-long — scoring run over one
+    unlucky batch.
+    """
+    return "tool_use_failed" in str(exc)
+
+
+def _call_with_rate_limit_retry(fn):
+    delay = 2.0
+    for attempt in range(MAX_RATE_LIMIT_RETRIES):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if _is_daily_quota_error(exc):
+                raise DailyQuotaExceeded(
+                    "Hit a daily token/request quota on this model's free tier (not the per-minute "
+                    "limit — that one retries automatically). Options: wait for it to reset (Groq's "
+                    "error message above usually says how long), switch GROQ_MODEL in .env to a "
+                    "different model (each has its own separate daily budget), or switch "
+                    "LLM_PROVIDER for now. Original error: " + str(exc)
+                ) from exc
+            malformed = _is_malformed_tool_call_error(exc)
+            if not (malformed or _is_rate_limit_error(exc)) or attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                raise
+            if malformed:
+                log.warning(
+                    "Model produced malformed tool-call JSON (attempt %d/%d), retrying: %s",
+                    attempt + 1, MAX_RATE_LIMIT_RETRIES, exc,
+                )
+            else:
+                log.warning("Rate limited (attempt %d/%d), waiting %.0fs: %s", attempt + 1, MAX_RATE_LIMIT_RETRIES, delay, exc)
+                time.sleep(delay)
+                delay *= 2
+    raise AssertionError("unreachable")  # loop always returns or raises
+
+
+def _call_groq(client, *, system, user_message, tool_name, tool_description, input_schema, max_tokens) -> dict:
+    settings = get_settings()
+
+    def do_call():
+        return client.chat.completions.create(
+            model=settings.groq_model,
+            max_tokens=max_tokens,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "description": tool_description,
+                        "parameters": input_schema,
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": tool_name}},
+        )
+
+    response = _call_with_rate_limit_retry(do_call)
+    tool_calls = response.choices[0].message.tool_calls
+    if not tool_calls:
+        raise RuntimeError(f"Model did not call {tool_name}; got: {response.choices[0].message.content!r}")
+    return json.loads(tool_calls[0].function.arguments)
+
+
+def _call_gemini(client, *, system, user_message, tool_name, tool_description, input_schema, max_tokens) -> dict:
+    settings = get_settings()
+    from google.genai import types
+
+    def do_call():
+        return client.models.generate_content(
+            model=settings.gemini_model,
+            contents=user_message,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                max_output_tokens=max_tokens,
+                tools=[
+                    types.Tool(
+                        function_declarations=[
+                            types.FunctionDeclaration(
+                                name=tool_name,
+                                description=tool_description,
+                                # Accepts a plain JSON Schema dict directly (mutually
+                                # exclusive with `parameters`, which wants Google's
+                                # own non-standard Schema object shape instead).
+                                parameters_json_schema=input_schema,
+                            )
+                        ]
+                    )
+                ],
+                tool_config=types.ToolConfig(
+                    function_calling_config=types.FunctionCallingConfig(
+                        mode=types.FunctionCallingConfigMode.ANY,
+                        allowed_function_names=[tool_name],
+                    )
+                ),
+            ),
+        )
+
+    response = _call_with_rate_limit_retry(do_call)
+    calls = response.function_calls
+    if not calls:
+        raise RuntimeError(f"Model did not call {tool_name}; got: {response.text!r}")
+    return calls[0].args
+
+
+def _call_anthropic(client, *, system, user_message, tool_name, tool_description, input_schema, max_tokens) -> dict:
+    settings = get_settings()
+
+    def do_call():
+        return client.messages.create(
+            model=settings.anthropic_model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user_message}],
+            tools=[{"name": tool_name, "description": tool_description, "input_schema": input_schema}],
+            tool_choice={"type": "tool", "name": tool_name},
+        )
+
+    response = _call_with_rate_limit_retry(do_call)
+    for block in response.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            return block.input
+    raise RuntimeError(f"Model did not call {tool_name}; got: {response.content!r}")
+
+
+_HANDLERS = {"groq": _call_groq, "gemini": _call_gemini, "anthropic": _call_anthropic}
 
 
 def call_tool(
@@ -35,27 +285,36 @@ def call_tool(
     input_schema: dict,
     max_tokens: int = 4096,
 ) -> dict:
-    """Send one message, force the model to call `tool_name`, return its input dict."""
+    """Send one message, force the model to call `tool_name`, return its input dict.
+
+    If LLM_PROVIDER hits its free-tier *daily* quota (confirmed live: Groq's
+    openai/gpt-oss-20b caps at 200k tokens/day, independent of its per-minute
+    limit), and another free provider has a key configured too — e.g. both
+    GROQ_API_KEY and GEMINI_API_KEY are set — this automatically retries the
+    same call on that provider instead of stopping a long scoring run cold
+    for the rest of the day. Two independent free daily budgets are strictly
+    more than one. Never falls back to "anthropic" (see _FREE_FALLBACK_ORDER).
+    """
     settings = get_settings()
-    client = get_client()
+    primary = settings.llm_provider
+    candidates = [primary] + [
+        p for p in _FREE_FALLBACK_ORDER if p != primary and _provider_has_key(settings, p)
+    ]
 
-    response = client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user_message}],
-        tools=[
-            {
-                "name": tool_name,
-                "description": tool_description,
-                "input_schema": input_schema,
-            }
-        ],
-        tool_choice={"type": "tool", "name": tool_name},
-    )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            return block.input
-
-    raise RuntimeError(f"Model did not call {tool_name}; got: {response.content!r}")
+    last_quota_exc: DailyQuotaExceeded | None = None
+    for provider in candidates:
+        client = _get_client(provider)
+        handler = _HANDLERS[provider]
+        try:
+            result = handler(
+                client, system=system, user_message=user_message, tool_name=tool_name,
+                tool_description=tool_description, input_schema=input_schema, max_tokens=max_tokens,
+            )
+        except DailyQuotaExceeded as exc:
+            last_quota_exc = exc
+            log.warning("Provider %r hit its daily quota; trying the next configured provider...", provider)
+            continue
+        if provider != primary:
+            log.warning("Fell back from LLM_PROVIDER=%r to %r after a daily quota limit.", primary, provider)
+        return result
+    raise last_quota_exc

@@ -9,7 +9,9 @@ from sqlalchemy import select
 from jobbot.agent.identity import canonical_url, job_identity
 from jobbot.config import load_companies, load_search_settings
 from jobbot.db import session_scope
-from jobbot.discovery import adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs
+from jobbot.discovery import (
+    adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs, workday,
+)
 from jobbot.discovery.base import NormalizedJob
 from jobbot.discovery.recency import filter_recent
 from jobbot.models import Job
@@ -22,6 +24,10 @@ _ATS_CONNECTORS = {
     "ashby": ashby.fetch_jobs,
     "smartrecruiters": smartrecruiters.fetch_jobs,
     "recruitee": recruitee.fetch_jobs,
+    # workday's "slug" is a full careers URL, not a bare company slug like
+    # the others — fetch_jobs still takes a single string either way, so no
+    # special-casing needed here. See discovery/workday.py.
+    "workday": workday.fetch_jobs,
 }
 
 
@@ -39,6 +45,14 @@ def discover_ats_jobs() -> list[NormalizedJob]:
 
 
 def discover_aggregator_jobs() -> list[NormalizedJob]:
+    """Each aggregator can be configured with either a single query (the
+    original what/where/tag/category keys, kept working for anyone with an
+    existing settings.yaml) or a LIST of them (queries/tags/categories) —
+    e.g. one Adzuna query per city plus a remote-worldwide one, or a
+    RemoteOK/Remotive tag per role you're searching for. Fans out over all
+    of them; results overlapping across queries dedupe naturally in
+    persist_jobs since Adzuna/RemoteOK/Remotive ids are stable regardless
+    of which query surfaced a given posting."""
     settings = load_search_settings()
     agg_cfg = settings.get("aggregators", {}) or {}
     jobs: list[NormalizedJob] = []
@@ -46,7 +60,13 @@ def discover_aggregator_jobs() -> list[NormalizedJob]:
     with httpx.Client() as client:
         adzuna_cfg = agg_cfg.get("adzuna", {}) or {}
         if adzuna_cfg.get("enabled"):
-            jobs.extend(adzuna.fetch_jobs(adzuna_cfg.get("what", ""), adzuna_cfg.get("where", ""), client=client))
+            queries = adzuna_cfg.get("queries") or [
+                {"what": adzuna_cfg.get("what", ""), "where": adzuna_cfg.get("where", ""), "country": adzuna_cfg.get("country", "")}
+            ]
+            for q in queries:
+                what, where, country = q.get("what", ""), q.get("where", ""), q.get("country", "")
+                log.info("Discovering adzuna / what=%r where=%r country=%r", what, where, country)
+                jobs.extend(adzuna.fetch_jobs(what, where, country, client=client))
 
         usajobs_cfg = agg_cfg.get("usajobs", {}) or {}
         if usajobs_cfg.get("enabled"):
@@ -54,11 +74,17 @@ def discover_aggregator_jobs() -> list[NormalizedJob]:
 
         remoteok_cfg = agg_cfg.get("remoteok", {}) or {}
         if remoteok_cfg.get("enabled"):
-            jobs.extend(remoteok.fetch_jobs(remoteok_cfg.get("tag", ""), client=client))
+            tags = remoteok_cfg.get("tags") or [remoteok_cfg.get("tag", "")]
+            for tag in tags:
+                log.info("Discovering remoteok / tag=%r", tag)
+                jobs.extend(remoteok.fetch_jobs(tag, client=client))
 
         remotive_cfg = agg_cfg.get("remotive", {}) or {}
         if remotive_cfg.get("enabled"):
-            jobs.extend(remotive.fetch_jobs(remotive_cfg.get("category", ""), client=client))
+            categories = remotive_cfg.get("categories") or [remotive_cfg.get("category", "")]
+            for category in categories:
+                log.info("Discovering remotive / category=%r", category)
+                jobs.extend(remotive.fetch_jobs(category, client=client))
 
     return jobs
 

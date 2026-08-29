@@ -426,6 +426,30 @@ def batch(
     )
 
 
+@app.command(name="apply-all")
+def apply_all(
+    min_score: float = typer.Option(60, help="Only apply to jobs at or above this fit score"),
+    limit: int = typer.Option(500, help="Max applications to attempt this run"),
+    auto_submit: bool = typer.Option(
+        False, help="Skip the terminal confirmation and submit automatically IF every field was filled with no human-review flags. Off by default; read the README before enabling."
+    ),
+    autofill_sensitive: bool | None = typer.Option(
+        None, help="Override JOBBOT_AUTOFILL_SENSITIVE for this run. Still requires typing CONFIRM once, before the run starts (not per application)."
+    ),
+) -> None:
+    """Exactly `batch`, just named for what people actually ask for: apply
+    to everything above a score threshold, no per-job IDs to type. Default
+    limit is 500 instead of batch's 10 -- run `jobbot list --min-score 60`
+    first to see roughly how many that threshold covers before committing.
+    Same guardrails as batch: a job is skipped if any previous attempt
+    consumed it -- not just a confirmed submission, but also an attempt
+    that died mid-submit or is awaiting review, since an outcome we cannot
+    prove is not a licence to apply again. Matching is by cross-source job
+    identity, so one posting found through two sources is still applied to
+    once. Without --auto-submit each one still stops for your review."""
+    batch(min_score=min_score, limit=limit, auto_submit=auto_submit, autofill_sensitive=autofill_sensitive)
+
+
 @app.command()
 def ledger(limit: int = typer.Option(30)) -> None:
     """Show recent application attempts and their outcome."""

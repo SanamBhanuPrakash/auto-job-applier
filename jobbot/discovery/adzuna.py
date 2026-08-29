@@ -11,6 +11,7 @@ import httpx
 from jobbot.config import get_settings
 from jobbot.discovery.base import NormalizedJob
 from jobbot.utils.ratelimit import http_retry
+from jobbot.utils.textclean import strip_html
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +25,15 @@ def _fetch(client: httpx.Client, country: str, params: dict) -> dict:
     return resp.json()
 
 
-def fetch_jobs(what: str, where: str = "", client: httpx.Client | None = None) -> list[NormalizedJob]:
+def fetch_jobs(
+    what: str, where: str = "", country: str = "", client: httpx.Client | None = None
+) -> list[NormalizedJob]:
+    """`country` is an Adzuna market code (e.g. "in", "us", "gb") — defaults
+    to ADZUNA_COUNTRY when not given. Adzuna covers 18 countries (as of
+    checking: US/UK/Canada/Australia/Germany/France/Spain/Italy/Netherlands/
+    Austria/Belgium/Brazil/India/Mexico/New Zealand/Poland/Singapore/South
+    Africa) — call this once per market/city you want covered (see
+    aggregate.py, which fans out over settings.yaml's aggregators.adzuna.queries)."""
     settings = get_settings()
     if not settings.adzuna_app_id or not settings.adzuna_app_key:
         log.info("Adzuna skipped: ADZUNA_APP_ID/ADZUNA_APP_KEY not set")
@@ -42,9 +51,9 @@ def fetch_jobs(what: str, where: str = "", client: httpx.Client | None = None) -
         params["where"] = where
 
     try:
-        data = _fetch(client, settings.adzuna_country, params)
+        data = _fetch(client, country or settings.adzuna_country, params)
     except httpx.HTTPStatusError as exc:
-        log.warning("Adzuna fetch failed: %s", exc)
+        log.warning("Adzuna fetch failed (what=%r where=%r country=%r): %s", what, where, country, exc)
         return []
     finally:
         if owns_client:
@@ -62,7 +71,7 @@ def fetch_jobs(what: str, where: str = "", client: httpx.Client | None = None) -
                 url=item.get("redirect_url", ""),
                 location=location,
                 remote="remote" in location.lower(),
-                description=item.get("description", "") or "",
+                description=strip_html(item.get("description", "") or ""),
                 posted_at=item.get("created", ""),
                 ats="",
                 raw=item,

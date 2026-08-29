@@ -1,20 +1,27 @@
 """Orchestrates one application attempt as an explicit, crash-safe state machine.
 
   claim (race-free) -> OPENING_APPLICATION -> INSPECTING_FORM -> FILLING
-  -> VERIFYING_FIELDS -> READY_TO_SUBMIT -> [persist SUBMITTING] -> click
-  -> VERIFYING_SUBMISSION -> verdict -> SUBMITTED | HUMAN_REVIEW | ...
+  -> VERIFYING_FIELDS -> READY_TO_SUBMIT -> SUBMITTING -> VERIFYING_SUBMISSION
+  -> SUBMITTED | HUMAN_REVIEW | BLOCKED | UNKNOWN
+
+Field values are resolved cheapest-first: static profile mappings, then
+remembered answers, then (only for what's left) the LLM.
 
 Two orderings in here are load-bearing and should not be "tidied up":
 
-1. `SUBMITTING` is written to the database *before* the submit button is
-   clicked. If the process dies mid-click, the row proves we were about to
-   act, so recovery escalates to a human instead of blindly re-applying.
-   Writing it after the click would reintroduce the duplicate-application
-   bug this design exists to prevent.
+1. In the unattended path, `SUBMITTING` is written to the database *before*
+   the submit button is clicked. If the process dies mid-click, the row
+   proves we were about to act, so recovery escalates to a human instead
+   of blindly re-applying. (In the interactive path the click is the
+   human's, at a time we don't control, so we instead enter SUBMITTING the
+   moment we detect it — see `_await_human_submit`.)
 
-2. The submission verdict comes from inspecting the resulting page
-   (jobbot/submit/verify.py), never from "the click didn't raise". UNKNOWN
-   is never upgraded to SUBMITTED.
+2. The outcome comes from inspecting the resulting page
+   (jobbot/submit/verify.py), never from "the click didn't raise" or "the
+   page navigated". Navigation and the submit button disappearing are
+   equally consistent with a validation failure that re-rendered, so they
+   are treated as a trigger to verify, not as proof. UNKNOWN is never
+   upgraded to SUBMITTED.
 
 Uses a persistent browser profile so cookies and any manual login survive
 between runs; a fresh profile per run re-triggers 2FA/CAPTCHA every time.
@@ -40,7 +47,8 @@ from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
-from jobbot.submit.review import confirm_submit, show_review
+from jobbot.submit.review import show_review, wait_for_submit_or_close
+from jobbot.submit.static_answers import resolve_static_fields
 from jobbot.submit.verify import SubmissionVerdict, detect_blocking, verify_submission
 
 log = logging.getLogger(__name__)
@@ -53,7 +61,7 @@ class UnsupportedATS(ValueError):
 
     Typed (rather than a bare ValueError raised mid-batch) so a batch run
     can skip one unsupported posting instead of aborting every remaining
-    application behind it.
+    application queued behind it.
     """
 
 
@@ -65,8 +73,8 @@ def _user_data_dir() -> Path:
 
 
 def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
-    """Use the resume `jobbot match` decided fits this job best, falling
-    back to the single global config/profile.yaml."""
+    """Uses the resume `jobbot match` decided fits this job best, falling
+    back to the single global config/profile.yaml + JOBBOT_RESUME_PATH."""
     settings = get_settings()
     if job.matched_profile_tag:
         row = multi_resume.get_profile(job.matched_profile_tag)
@@ -79,16 +87,20 @@ def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
     return Profile.model_validate(load_profile_raw()), settings.jobbot_resume_path
 
 
-def _park(app_id: int, state: ApplicationState, *, reason: str,
+def _park(app_id: int, state: ApplicationState, *, reason: str = "",
           category: FailureCategory | None = None, run_id: str = "",
-          detail: dict | None = None) -> Application:
+          detail: dict | None = None) -> None:
     with session_scope() as session:
         app = session.get(Application, app_id)
         statestore.transition(
             session, app, state, reason=reason, run_id=run_id,
             failure_category=category, detail=detail,
         )
-        return app
+
+
+def _reload(app_id: int) -> Application:
+    with session_scope() as session:
+        return session.get(Application, app_id)
 
 
 def apply_to_job(
@@ -117,7 +129,7 @@ def apply_to_job(
     )
 
     # --- claim: the database picks one winner, so two concurrent runs
-    # cannot both proceed to apply to the same posting ---------------------
+    # cannot both proceed to apply to the same posting -------------------
     with session_scope() as session:
         claim = statestore.claim(session, job, run_id=run_id)
     if not claim.acquired:
@@ -155,9 +167,11 @@ def apply_to_job(
 
             _park(app_id, ApplicationState.INSPECTING_FORM, reason="form located", run_id=run_id)
             fields = scan_form(form_ctx)
-            job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:2000]}"
+            # Kept short for the same reason matching/score.py truncates
+            # descriptions — Groq's free-tier 6,000 tokens/minute cap.
+            job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:800]}"
 
-            # --- resolve fields from memory / circuit breaker -------------
+            # --- resolve fields from memory / circuit breaker ------------
             with session_scope() as session:
                 matches = learning_store.match_fields(session, fields)
                 by_id = {f.field_id: f for f in fields}
@@ -217,18 +231,38 @@ def apply_to_job(
                 if fid not in remembered_plan
             }
 
+            # Resolve the handful of near-universal fields (name, email,
+            # phone, links, current company/title, school, ...) directly
+            # from the profile before anything goes to the LLM at all — see
+            # static_answers.py. Never overrides a remembered answer
+            # (something you actually typed beats a generic mapping) or a
+            # circuit-broken field.
+            static_plan = {
+                fid: v for fid, v in resolve_static_fields(profile, fields).items()
+                if fid not in remembered_plan and fid not in circuit_broken_plan
+            }
+
             llm_fields = [
                 f for f in fields
-                if f.field_id not in remembered_plan and f.field_id not in circuit_broken_plan
+                if f.field_id not in remembered_plan
+                and f.field_id not in circuit_broken_plan
+                and f.field_id not in static_plan
             ]
 
             _park(app_id, ApplicationState.FILLING,
-                  reason=f"{len(remembered_plan)} from memory, {len(llm_fields)} to plan", run_id=run_id)
+                  reason=(f"{len(static_plan)} static, {len(remembered_plan)} from memory, "
+                          f"{len(llm_fields)} to plan"),
+                  run_id=run_id)
 
-            plan = build_fill_plan(profile, llm_fields, job_context)
+            llm_plan = build_fill_plan(profile, llm_fields, job_context)
+            # Only genuine model output counts as a guess for provenance;
+            # static answers come straight from the candidate's own profile.
             model_filled_ids = {
-                fid for fid, d in plan.items() if not d["needs_human"] and d.get("value")
+                fid for fid, d in llm_plan.items() if not d["needs_human"] and d.get("value")
             }
+
+            plan = dict(static_plan)
+            plan.update(llm_plan)
             plan.update(remembered_plan)
             plan.update(circuit_broken_plan)
 
@@ -253,6 +287,13 @@ def apply_to_job(
             screenshot_path = settings.data_dir / "screenshots" / f"application_{app_id}.png"
             page.screenshot(path=str(screenshot_path), full_page=True)
 
+            with session_scope() as session:
+                app = session.get(Application, app_id)
+                app.fill_plan = {str(k): v for k, v in plan.items()}
+                app.fields_needing_human = {f.field_id: f.label for f in needs_human}
+                app.screenshot_path = str(screenshot_path)
+                session.commit()
+
             _park(app_id, ApplicationState.READY_TO_SUBMIT,
                   reason="form filled and verified", run_id=run_id,
                   detail={"screenshot": str(screenshot_path)})
@@ -267,51 +308,39 @@ def apply_to_job(
                 )
                 auto_submit = False
 
-            should_submit = auto_submit or confirm_submit(job)
+            if auto_submit:
+                submitted_attempt = _auto_submit(page, form_ctx, ats_module, job, app_id, run_id=run_id)
+            else:
+                submitted_attempt = _await_human_submit(
+                    page, form_ctx, ats_module, job, fields, app_id,
+                    run_id=run_id, model_filled_ids=model_filled_ids,
+                )
 
-            with session_scope() as session:
-                app = session.get(Application, app_id)
-                app.fill_plan = {str(k): v for k, v in plan.items()}
-                app.fields_needing_human = {f.field_id: f.label for f in needs_human}
-                app.screenshot_path = str(screenshot_path)
-                session.commit()
-
-            if not should_submit:
-                _capture_learning(form_ctx, fields, verified=False, model_filled_ids=model_filled_ids)
-                _park(app_id, ApplicationState.HUMAN_REVIEW,
-                      reason="not submitted; awaiting your decision", run_id=run_id)
+            if not submitted_attempt:
+                _capture_learning(page, form_ctx, fields, verified=False,
+                                  model_filled_ids=model_filled_ids)
+                _park(app_id, ApplicationState.SKIPPED,
+                      reason="closed without submitting", run_id=run_id)
                 return _reload(app_id)
 
-            # --- danger zone -------------------------------------------
-            # Persisted BEFORE the click, so a crash here is recoverable.
-            url_before = page.url
-            _park(app_id, ApplicationState.SUBMITTING, reason="about to click submit",
-                  run_id=run_id, detail={"url_before": url_before})
-
-            try:
-                ats_module.click_submit(form_ctx)
-            except Exception as exc:  # noqa: BLE001
-                # The click itself failed, but we cannot assume nothing was
-                # sent — verify rather than declaring failure.
-                log.warning("Submit click raised for job %d: %s", job.id, exc)
-
+            # --- verify what actually happened --------------------------
             _park(app_id, ApplicationState.VERIFYING_SUBMISSION,
                   reason="inspecting page for submission evidence", run_id=run_id)
 
             result = verify_submission(
                 page, form_ctx,
-                url_before=url_before,
+                url_before=submitted_attempt,
                 submit_selector=ats_module.SUBMIT_SELECTOR,
             )
             post_shot = settings.data_dir / "screenshots" / f"application_{app_id}_post.png"
             try:
                 page.screenshot(path=str(post_shot), full_page=True)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - page may be closed
                 post_shot = Path("")
 
             _finalize_verdict(app_id, result, post_shot, run_id=run_id)
             _capture_learning(
-                form_ctx, fields,
+                page, form_ctx, fields,
                 verified=result.verdict is SubmissionVerdict.SUBMITTED,
                 model_filled_ids=model_filled_ids,
             )
@@ -324,14 +353,11 @@ def apply_to_job(
                 current = ApplicationState(app.state)
                 # A failure at or past SUBMITTING cannot be called a clean
                 # failure — the employer may hold the application.
-                target = (
-                    ApplicationState.UNKNOWN
-                    if current in (ApplicationState.SUBMITTING, ApplicationState.VERIFYING_SUBMISSION)
-                    else ApplicationState.FAILED
-                )
+                in_danger = current in (ApplicationState.SUBMITTING,
+                                        ApplicationState.VERIFYING_SUBMISSION)
+                target = ApplicationState.UNKNOWN if in_danger else ApplicationState.FAILED
                 category = (
-                    FailureCategory.AMBIGUOUS if target is ApplicationState.UNKNOWN
-                    else FailureCategory.RECOVERABLE
+                    FailureCategory.AMBIGUOUS if in_danger else FailureCategory.RECOVERABLE
                 )
                 app.error = str(exc)
                 statestore.transition(
@@ -340,16 +366,76 @@ def apply_to_job(
                 )
             return _reload(app_id)
         finally:
-            context.close()
+            # If the browser/context already died (crashed, or Playwright's
+            # own action timeouts cascaded into it becoming unresponsive),
+            # closing it can itself raise. That must never mask the real
+            # outcome above: the except block already recorded the state and
+            # returned cleanly, and a second exception from cleanup here
+            # would otherwise replace that return and crash the whole call.
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                log.debug("context.close() failed (already closed) — ignoring", exc_info=True)
 
 
-def _reload(app_id: int) -> Application:
-    with session_scope() as session:
-        return session.get(Application, app_id)
+def _auto_submit(page, form_ctx, ats_module, job: Job, app_id: int, *, run_id: str) -> str | None:
+    """Unattended submit. Returns the pre-click URL (to verify against) or
+    None if no click was made.
 
+    SUBMITTING is persisted *before* the click: nobody is watching an
+    unattended run, so a crash here must be recoverable from the database
+    alone.
+    """
+    if page.is_closed():
+        _park(app_id, ApplicationState.FAILED,
+              reason="Browser window closed before Submit could be clicked.",
+              category=FailureCategory.RECOVERABLE, run_id=run_id)
+        return None
 
-def _capture_learning(form_ctx, fields, *, verified: bool, model_filled_ids: set[int]) -> None:
+    url_before = page.url
+    _park(app_id, ApplicationState.SUBMITTING, reason="about to click submit",
+          run_id=run_id, detail={"url_before": url_before})
     try:
+        ats_module.click_submit(form_ctx)
+    except Exception as exc:  # noqa: BLE001
+        # The click raised, but we cannot assume nothing was sent — fall
+        # through to verification rather than declaring failure.
+        log.warning("Submit click raised for job %d: %s", job.id, exc)
+    return url_before
+
+
+def _await_human_submit(
+    page, form_ctx, ats_module, job: Job, fields, app_id: int, *,
+    run_id: str, model_filled_ids: set[int],
+) -> str | None:
+    """Watch the browser for the candidate submitting (or closing) it.
+
+    Returns the pre-submit URL if a submit appears to have happened, else
+    None. Note the return of `wait_for_submit_or_close` is only a *trigger
+    to verify*: it concludes "submitted" from navigation or the submit
+    button disappearing, and both are equally consistent with a validation
+    error that re-rendered the form. The verdict comes from verify.py.
+
+    Unlike the unattended path, SUBMITTING is entered on *detection* rather
+    than before the click, because the click is the human's and happens at
+    a time we do not control.
+    """
+    url_before = form_ctx.url if not page.is_closed() else ""
+    outcome = wait_for_submit_or_close(
+        page, form_ctx, ats_module, job, fields, model_filled_ids=model_filled_ids
+    )
+    if outcome != "submitted":
+        return None
+    _park(app_id, ApplicationState.SUBMITTING,
+          reason="detected your submit in the browser", run_id=run_id,
+          detail={"url_before": url_before})
+    return url_before
+
+
+def _capture_learning(page, form_ctx, fields, *, verified: bool, model_filled_ids: set[int]) -> None:
+    try:
+        if page.is_closed():
+            return  # nothing to read; reading would just raise
         with session_scope() as session:
             learning_store.capture_from_page(
                 session, form_ctx, fields,
@@ -357,7 +443,7 @@ def _capture_learning(form_ctx, fields, *, verified: bool, model_filled_ids: set
                 model_filled_ids=model_filled_ids,
             )
     except Exception:  # noqa: BLE001 - learning must never break an application
-        log.exception("Failed to capture learned answers (continuing)")
+        log.debug("Failed to capture learned answers (continuing)", exc_info=True)
 
 
 #: How a verification verdict lands in the state machine. Only a positively
@@ -381,8 +467,7 @@ def _finalize_verdict(app_id: int, result, post_shot: Path, *, run_id: str) -> N
         statestore.transition(
             session, app, target,
             reason=f"verdict={result.verdict.value}: " + "; ".join(result.evidence)[:400],
-            run_id=run_id, failure_category=category,
-            detail=result.as_dict(),
+            run_id=run_id, failure_category=category, detail=result.as_dict(),
         )
     if result.verdict is not SubmissionVerdict.SUBMITTED:
         log.warning(

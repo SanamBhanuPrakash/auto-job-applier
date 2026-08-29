@@ -7,6 +7,7 @@ import httpx
 
 from jobbot.discovery.base import NormalizedJob
 from jobbot.utils.ratelimit import http_retry
+from jobbot.utils.textclean import strip_html
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ def fetch_jobs(tag: str = "", client: httpx.Client | None = None) -> list[Normal
                 url=item.get("url", ""),
                 location=item.get("location", "") or "Remote",
                 remote=True,
-                description=item.get("description", "") or "",
+                description=strip_html(item.get("description", "") or ""),
                 posted_at=item.get("date", ""),
                 ats="",
                 raw=item,

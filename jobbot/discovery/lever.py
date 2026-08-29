@@ -10,6 +10,7 @@ import httpx
 
 from jobbot.discovery.base import NormalizedJob
 from jobbot.utils.ratelimit import http_retry
+from jobbot.utils.textclean import strip_html
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +40,8 @@ def fetch_jobs(company_slug: str, client: httpx.Client | None = None) -> list[No
     for item in data:
         categories = item.get("categories", {}) or {}
         location = categories.get("location", "") or ""
-        description = "\n".join(
-            filter(None, [item.get("descriptionPlain", ""), item.get("additionalPlain", "")])
+        description = strip_html(
+            "\n".join(filter(None, [item.get("descriptionPlain", ""), item.get("additionalPlain", "")]))
         )
         jobs.append(
             NormalizedJob(
