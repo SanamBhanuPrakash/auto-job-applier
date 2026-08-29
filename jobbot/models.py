@@ -31,6 +31,12 @@ class Job(Base):
     ats: Mapped[str] = mapped_column(String(32), default="")  # normalized ATS type for submission routing
     discovered_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Cross-source identity (jobbot/agent/identity.py). (source, external_id)
+    # below is unique per *source*, so the same posting found via a company
+    # board and via an aggregator yields two rows; job_identity collapses
+    # those for duplicate-application protection.
+    canonical_url: Mapped[str] = mapped_column(String(1024), default="")
+    job_identity: Mapped[str] = mapped_column(String(128), default="", index=True)
     # Tag of the ResumeProfile jobbot decided fits this job best (set by
     # `jobbot match` when multiple resumes are configured). Empty means
     # either no resumes/ folder was imported, or nothing matched — falls
@@ -58,16 +64,89 @@ class Application(Base):
     __tablename__ = "applications"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"))
+    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id"), index=True)
     status: Mapped[str] = mapped_column(String(32), default="attempted")
+    # Legacy free-text status, kept so existing ledgers/queries keep working.
     # attempted | filled_pending_review | submitted | skipped | error
+    # `state` below is the authoritative machine-checked value.
     fill_plan: Mapped[dict] = mapped_column(JSON, default=dict)
     fields_needing_human: Mapped[dict] = mapped_column(JSON, default=dict)
     screenshot_path: Mapped[str] = mapped_column(String(1024), default="")
     error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    # --- agent state machine (jobbot/agent/states.py) --------------------
+    state: Mapped[str] = mapped_column(String(32), default="", index=True)
+    previous_state: Mapped[str] = mapped_column(String(32), default="")
+    attempt_no: Mapped[int] = mapped_column(default=1)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # --- idempotency (jobbot/agent/identity.py) --------------------------
+    # UNIQUE: a second process trying to start an attempt for the same
+    # posting loses the INSERT race in the database rather than racing us
+    # into a duplicate submission. NULL for pre-existing legacy rows, and
+    # SQLite permits many NULLs in a unique column, so old data is fine.
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True)
+    job_identity: Mapped[str] = mapped_column(String(128), default="", index=True)
+    canonical_url: Mapped[str] = mapped_column(String(1024), default="")
+    submission_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+
+    # --- crash-safe leasing ---------------------------------------------
+    lease_owner: Mapped[str] = mapped_column(String(64), default="")
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # --- submission verification (jobbot/submit/verify.py) ---------------
+    verification_verdict: Mapped[str] = mapped_column(String(32), default="")
+    verification_evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    post_submit_screenshot: Mapped[str] = mapped_column(String(1024), default="")
+
+    # --- failure handling ------------------------------------------------
+    failure_category: Mapped[str] = mapped_column(String(32), default="")
+    checkpoint: Mapped[dict] = mapped_column(JSON, default=dict)
+    run_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+
     job: Mapped[Job] = relationship(back_populates="applications")
+
+
+class Run(Base):
+    """One invocation of the agent. Gives every application attempt a
+    traceable parent ("what did last night's run do?") and carries the
+    budget counters that bound the run."""
+
+    __tablename__ = "runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    command: Mapped[str] = mapped_column(String(128), default="")
+    status: Mapped[str] = mapped_column(String(32), default="RUNNING")  # RUNNING|COMPLETED|ABORTED|FAILED
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    ended_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    jobs_considered: Mapped[int] = mapped_column(default=0)
+    applications_attempted: Mapped[int] = mapped_column(default=0)
+    applications_submitted: Mapped[int] = mapped_column(default=0)
+    llm_calls: Mapped[int] = mapped_column(default=0)
+    input_tokens: Mapped[int] = mapped_column(default=0)
+    output_tokens: Mapped[int] = mapped_column(default=0)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class StateTransition(Base):
+    """Append-only audit of every state change. This is what makes a crash
+    recoverable: the last row for an application tells you exactly where it
+    was, and `to_state` being in the danger zone is what stops a blind retry."""
+
+    __tablename__ = "state_transitions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    application_id: Mapped[int] = mapped_column(ForeignKey("applications.id"), index=True)
+    run_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    from_state: Mapped[str] = mapped_column(String(32), default="")
+    to_state: Mapped[str] = mapped_column(String(32))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    failure_category: Mapped[str] = mapped_column(String(32), default="")
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class LearnedAnswer(Base):
@@ -91,6 +170,17 @@ class LearnedAnswer(Base):
     times_used: Mapped[int] = mapped_column(default=1)
     last_used_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    # --- provenance ------------------------------------------------------
+    # Without this, a value the *model guessed* on a form that was never
+    # submitted is indistinguishable from one the *candidate typed* on an
+    # application that succeeded — and the sensitive-autofill flow would
+    # then present a hallucination back as "your saved answer" for a legal
+    # question. See jobbot/learning/provenance.py.
+    provenance: Mapped[str] = mapped_column(String(32), default="unverified")
+    human_confirmed: Mapped[bool] = mapped_column(default=False)
+    verified_submission_count: Mapped[int] = mapped_column(default=0)
+    last_validated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ResumeProfile(Base):

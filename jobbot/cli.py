@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from sqlalchemy import select
 
+from jobbot.agent.states import CONSUMES_JOB
 from jobbot.config import get_settings, load_search_settings, save_profile_raw
 from jobbot.db import session_scope
 from jobbot.logging_conf import setup_logging
@@ -252,11 +253,47 @@ def _confirm_sensitive_autofill_if_needed(override: bool | None) -> bool:
 
 
 def _already_submitted_job_ids(session) -> set[int]:
+    """Job ids with a completed submission on record.
+
+    Kept for display/back-compat. `_consumed_job_ids` below is what
+    actually gates applying, because "submitted" alone is too narrow: an
+    attempt that died mid-submit must also block a re-attempt.
+    """
     return set(
         session.execute(
             select(Application.job_id).where(Application.status == "submitted").distinct()
         ).scalars().all()
     )
+
+
+def _consumed_job_ids(session) -> set[int]:
+    """Job ids that must not be attempted again.
+
+    Broader than "submitted" in two ways that both prevent duplicate
+    applications to a real employer:
+
+    1. It includes attempts parked in the danger zone (SUBMITTING /
+       VERIFYING_SUBMISSION / UNKNOWN) and those awaiting a human. An
+       outcome we cannot prove is *not* a licence to apply again.
+    2. It matches on cross-source job identity, so the same posting
+       discovered through two sources is only ever applied to once.
+    """
+    from jobbot.agent.statestore import consumed_job_identities
+
+    identities = consumed_job_identities(session)
+    ids = set(
+        session.execute(
+            select(Application.job_id).where(Application.state.in_([s.value for s in CONSUMES_JOB]))
+        ).scalars().all()
+    )
+    ids |= _already_submitted_job_ids(session)  # legacy rows with no state
+    if identities:
+        ids |= set(
+            session.execute(
+                select(Job.id).where(Job.job_identity.in_(list(identities)))
+            ).scalars().all()
+        )
+    return ids
 
 
 @app.command()
@@ -278,16 +315,33 @@ def apply(
         if job is None:
             console.print(f"[red]No job with id {job_id}[/red]")
             raise typer.Exit(1)
-        if not force and job.id in _already_submitted_job_ids(session):
+        if not force and job.id in _consumed_job_ids(session):
             console.print(
-                f"[yellow]Job {job_id} already has a submitted application on record.[/yellow] "
-                "Check `jobbot ledger`, or pass --force to apply again anyway."
+                f"[yellow]Job {job_id} already has an application attempt on record.[/yellow] "
+                "Check `jobbot ledger` / `jobbot review`, or pass --force to apply again anyway."
             )
             raise typer.Exit(1)
 
     confirmed_autofill = _confirm_sensitive_autofill_if_needed(autofill_sensitive)
-    result = apply_to_job(job, auto_submit_override=auto_submit, autofill_sensitive_override=confirmed_autofill)
-    console.print(f"[bold]Status: {result.status}[/bold]")
+
+    from jobbot.agent import statestore
+
+    with session_scope() as session:
+        run_id = statestore.start_run(session, command="apply")
+
+    result = apply_to_job(
+        job, run_id=run_id,
+        auto_submit_override=auto_submit,
+        autofill_sensitive_override=confirmed_autofill,
+    )
+
+    with session_scope() as session:
+        statestore.finish_run(session, run_id)
+
+    if result is None:
+        console.print("[yellow]Not applied — the job was already claimed or is awaiting review.[/yellow]")
+        return
+    console.print(f"[bold]State: {result.state}[/bold] (verdict: {result.verification_verdict or 'n/a'})")
     if result.error:
         console.print(f"[red]{result.error}[/red]")
 
@@ -315,7 +369,7 @@ def batch(
     supported = set(sub_cfg.get("supported_ats", ["greenhouse", "lever"]))
 
     with session_scope() as session:
-        already_submitted = _already_submitted_job_ids(session)
+        consumed = _consumed_job_ids(session)
         rows: list[Job] = []
         offset = 0
         page_size = max(limit * 2, 20)
@@ -330,7 +384,7 @@ def batch(
             ).scalars().all()
             if not page:
                 break
-            rows.extend(j for j in page if j.id not in already_submitted)
+            rows.extend(j for j in page if j.id not in consumed)
             offset += page_size
         rows = rows[:limit]
 
@@ -344,14 +398,31 @@ def batch(
 
     confirmed_autofill = _confirm_sensitive_autofill_if_needed(autofill_sensitive)
 
+    from jobbot.agent import statestore
     from jobbot.submit.base import apply_to_jobs
 
-    apply_to_jobs(
-        rows,
-        pacing_min=pacing_min,
-        pacing_max=pacing_max,
-        auto_submit_override=auto_submit,
-        autofill_sensitive_override=confirmed_autofill,
+    with session_scope() as session:
+        run_id = statestore.start_run(session, command="batch")
+    console.print(f"[dim]run {run_id}[/dim]")
+
+    try:
+        results = apply_to_jobs(
+            rows,
+            pacing_min=pacing_min,
+            pacing_max=pacing_max,
+            run_id=run_id,
+            auto_submit_override=auto_submit,
+            autofill_sensitive_override=confirmed_autofill,
+        )
+    finally:
+        with session_scope() as session:
+            statestore.finish_run(session, run_id)
+
+    submitted = sum(1 for r in results if r.state == "SUBMITTED")
+    console.print(
+        f"\n[bold]Run complete:[/bold] {len(results)} attempt(s), "
+        f"[green]{submitted} verified submitted[/green]. "
+        "Anything not verified is in `jobbot review`."
     )
 
 
@@ -375,6 +446,86 @@ def ledger(limit: int = typer.Option(30)) -> None:
     table.add_column("title")
     for application, job in rows:
         table.add_row(str(application.created_at), application.status, job.company, job.title)
+    console.print(table)
+
+
+@app.command()
+def review(limit: int = typer.Option(30)) -> None:
+    """Show application attempts parked awaiting a human.
+
+    This is where anything jobbot refused to guess about ends up: a
+    submission it could not verify, a CAPTCHA/login wall, or a form it
+    filled but did not submit. Nothing here is silently retried — an
+    attempt whose outcome is unproven is never re-applied automatically,
+    because that is exactly how a duplicate application happens.
+    """
+    from jobbot.agent.states import PARKED, ApplicationState
+
+    parked = [s.value for s in PARKED] + [ApplicationState.SUBMITTING.value,
+                                          ApplicationState.VERIFYING_SUBMISSION.value]
+    with session_scope() as session:
+        rows = session.execute(
+            select(Application, Job)
+            .join(Job, Job.id == Application.job_id)
+            .where(Application.state.in_(parked))
+            .order_by(Application.updated_at.desc())
+            .limit(limit)
+        ).all()
+
+    if not rows:
+        console.print("[green]Nothing awaiting review.[/green]")
+        return
+
+    table = Table(title="Awaiting human review")
+    table.add_column("app")
+    table.add_column("state")
+    table.add_column("verdict")
+    table.add_column("company")
+    table.add_column("title")
+    table.add_column("why")
+    for application, job in rows:
+        evidence = (application.verification_evidence or {}).get("evidence", [])
+        why = "; ".join(evidence)[:60] if evidence else (application.error or "")[:60]
+        table.add_row(
+            str(application.id), application.state,
+            application.verification_verdict or "-",
+            job.company, job.title, why,
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]An attempt in SUBMITTING/VERIFYING_SUBMISSION/UNKNOWN may already have "
+        "reached the employer — check the posting before re-applying.[/dim]"
+    )
+
+
+@app.command()
+def trace(application_id: int) -> None:
+    """Show the full state history of one application attempt — what it
+    did, in what order, and why it stopped where it did."""
+    from jobbot.agent.statestore import history
+
+    with session_scope() as session:
+        application = session.get(Application, application_id)
+        if application is None:
+            console.print(f"[red]No application with id {application_id}[/red]")
+            raise typer.Exit(1)
+        job = session.get(Job, application.job_id)
+        rows = history(session, application_id)
+
+    console.rule(f"Application {application_id} — {job.title} @ {job.company}")
+    console.print(f"State: [bold]{application.state}[/bold]  attempt #{application.attempt_no}")
+    console.print(f"Verdict: {application.verification_verdict or '-'}")
+    console.print(f"Run: {application.run_id or '-'}")
+
+    table = Table(title="State transitions")
+    table.add_column("when")
+    table.add_column("from")
+    table.add_column("to")
+    table.add_column("category")
+    table.add_column("reason")
+    for t in rows:
+        table.add_row(str(t.created_at), t.from_state or "-", t.to_state,
+                      t.failure_category or "", (t.reason or "")[:70])
     console.print(table)
 
 

@@ -6,6 +6,7 @@ import logging
 import httpx
 from sqlalchemy import select
 
+from jobbot.agent.identity import canonical_url, job_identity
 from jobbot.config import load_companies, load_search_settings
 from jobbot.db import session_scope
 from jobbot.discovery import adzuna, ashby, greenhouse, lever, recruitee, remoteok, remotive, smartrecruiters, usajobs
@@ -88,6 +89,16 @@ def persist_jobs(jobs: list[NormalizedJob]) -> tuple[int, int]:
                     posted_at=nj.posted_at,
                     ats=nj.ats,
                     raw=nj.raw,
+                    # Cross-source identity: (source, external_id) is unique
+                    # per source, so the same posting seen via a company
+                    # board and via an aggregator lands in two rows. This is
+                    # what lets duplicate-application protection see them as
+                    # one posting.
+                    canonical_url=canonical_url(nj.url),
+                    job_identity=job_identity(
+                        url=nj.url, company=nj.company, title=nj.title,
+                        source=nj.source, external_id=nj.external_id,
+                    ),
                 )
             )
             inserted += 1

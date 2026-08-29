@@ -79,7 +79,13 @@ jobbot/
     lexical.py             # free, fast keyword/location shortlist
     profile_select.py       # picks which ResumeProfile fits a job best (lexical, no LLM call)
     score.py                # Claude reranks the shortlist against the matched profile, writes JobScore
+  agent/
+    states.py                # ApplicationState machine + failure taxonomy/retry policy
+    identity.py               # canonical URLs, cross-source job identity, idempotency keys
+    statestore.py             # race-free claim/lease, validated + persisted transitions
+  migrate.py               # additive, idempotent SQLite migration (runs automatically)
   submit/
+    verify.py                # evidence-based submission verdict (never assumes success)
     form_scan.py           # generic DOM scanner (injects data-jobbot-id, handles
                             # native selects, react-aria comboboxes, radio groups) +
                             # find_target_frame(), which follows an <iframe> embed
@@ -91,11 +97,13 @@ jobbot/
     review.py               # screenshot + terminal confirmation gate (now shows memory hints too)
     base.py                  # orchestrates one application attempt end to end
   learning/
+    provenance.py            # trust levels; a model guess never autofills a sensitive field
     normalize.py             # question label -> stable matching key
     store.py                  # lookup/upsert/capture against learned_answers + field_issues
                               # (fuzzy match, value_still_offerable, circuit breaker)
   cli.py                   # typer CLI: run / discover / match / list / show / apply / batch / ledger / learned / resume
-  models.py, db.py         # SQLAlchemy: Job, JobScore, Application, LearnedAnswer, ResumeProfile, FieldIssue
+  models.py, db.py         # SQLAlchemy: Job, JobScore, Application, Run, StateTransition,
+                           # LearnedAnswer, ResumeProfile, FieldIssue
 tests/                    # discovery parsers + the guardrail regex, no network/browser needed
 ```
 
@@ -154,6 +162,8 @@ jobbot ledger                # what you've actually submitted, and when
 jobbot learned list           # what it's remembered so far, and how often each answer's been reused
 jobbot learned forget <id>    # delete one remembered answer (e.g. you mistyped it once)
 jobbot learned issues          # questions that keep failing to auto-fill (circuit-broken ones)
+jobbot review                  # attempts parked awaiting you (unverified submit, CAPTCHA, ...)
+jobbot trace <app-id>          # full state history of one attempt: what it did and why it stopped
 ```
 
 `jobbot apply`/`batch`/`run` launch a **visible** (headed) Chromium window
@@ -178,6 +188,61 @@ old, so this isn't just a nicety. Override per run with `--days` on
 `discover`/`run`, or set it to `0` to disable and see everything a source
 currently lists.
 
+## Agent architecture: why an application can't be submitted twice
+
+The submission path is an explicit, persisted state machine
+(`jobbot/agent/states.py`) rather than a mutable status string, because
+three specific failure modes could otherwise produce a duplicate
+application to a real employer or a false record of one:
+
+**1. The crash window.** The old code wrote `"attempted"` before opening the
+browser and `"submitted"` only after a successful click — so a crash
+*between* the click and the write left the database claiming the job was
+never applied to, and the next run applied again. Now `SUBMITTING` is
+persisted to disk **before** the button is clicked, and anything found at
+or past `SUBMITTING` is **never auto-resumed** (`is_safe_to_auto_resume`).
+An outcome we cannot prove is treated as possibly-submitted, not as
+free-to-retry.
+
+**2. The concurrency window.** Two runs both read "which jobs are already
+submitted" before either wrote, so both applied. Ownership is now acquired
+by `INSERT` against a `UNIQUE` index on `applications.idempotency_key`
+(`jobbot/agent/statestore.py`), so the database picks exactly one winner.
+Verified with three concurrent OS processes: one `CLAIMED`, the rest
+`HELD_BY_OTHER`.
+
+**3. Cross-source identity.** `(source, external_id)` is unique *per
+source*, so the same posting found on a company's Greenhouse board and via
+an aggregator produced two rows with two ids and duplicate protection
+missed it. `jobbot/agent/identity.py` derives one identity from the ATS's
+own job id — confirmed on live data, where `stripe.com/jobs/search?gh_jid=
+7557899` and `boards.greenhouse.io/stripe/jobs/7557899` both resolve to
+`ats:greenhouse:7557899`. Tracking parameters (`utm_*`, `gh_src`, `ref`)
+are stripped; identifying ones (`gh_jid`) are deliberately kept, because
+over-normalizing would silently merge two real jobs into one.
+
+### Submission is verified, not assumed
+
+`click_submit()` returning without raising is **not** evidence of
+submission — it returns normally for a validation failure, a multi-step
+form whose "Continue" button matched the submit selector, a CAPTCHA
+interstitial, or a silently-failed request. `jobbot/submit/verify.py`
+inspects the resulting page and returns one of `SUBMITTED`,
+`NOT_SUBMITTED`, `BLOCKED`, `FAILED`, `UNKNOWN`.
+
+Signals are graded and **not interchangeable**: only a *strong* signal
+(confirmation wording, or a confirmation URL) can return `SUBMITTED`. Weak
+signals — navigation, the form disappearing, the button disappearing — are
+each equally consistent with a failed submit that redirected to a careers
+homepage, so no quantity of them adds up to proof. **`UNKNOWN` is never
+upgraded to `SUBMITTED`**; it routes to `jobbot review`, because a wrong
+"submitted" is unrecoverable (you believe you applied, and the job is
+blocked from retry) while a human check is not. A post-submit screenshot
+is captured as evidence either way.
+
+Run `jobbot review` to see anything parked, and `jobbot trace <id>` for the
+full state history of one attempt.
+
 ## Memory: how it adapts across applications
 
 Every non-file field that ends up with a value — whether Claude filled it or
@@ -196,6 +261,19 @@ that *this specific posting's* option list actually still offers it
 (`value_still_offerable`) — a remembered "OPT" isn't applied to a form whose
 visa-type dropdown only offers "H1B/L1/None", it falls back to the model
 instead.
+
+Every remembered value carries **provenance**
+(`jobbot/learning/provenance.py`): whether *you* typed it, the *model*
+guessed it, or it was present on an application whose submission was
+positively verified. This matters because values are learned by reading the
+form back — without provenance, a hallucinated answer is indistinguishable
+from a confirmed one, and could be replayed unattended onto a
+work-authorization question on a later application. **A model guess can
+never auto-fill a sensitive field**, however many times it has been reused;
+reuse count measures repetition, not correctness. Trust only ratchets
+upward, so re-seeing a confirmed value on an unverified form never
+downgrades it, and rows written before provenance existed are treated as
+untrusted rather than grandfathered in.
 
 **Sensitive fields** (work authorization, EEOC/demographic questions, legal
 attestations, government IDs, salary history/background — the same regex

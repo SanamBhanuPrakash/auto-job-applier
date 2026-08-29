@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from jobbot.learning.normalize import normalize_label
+from jobbot.learning.provenance import Provenance, strongest
 from jobbot.models import FieldIssue, LearnedAnswer
 from jobbot.submit.form_scan import FieldSpec, FrameLike
 
@@ -82,7 +83,17 @@ def match_fields(session: Session, fields: list[FieldSpec]) -> dict[int, Learned
     return matches
 
 
-def upsert(session: Session, label: str, field_type: str, value: str, sensitive: bool) -> LearnedAnswer:
+def upsert(
+    session: Session,
+    label: str,
+    field_type: str,
+    value: str,
+    sensitive: bool,
+    *,
+    provenance: str = Provenance.UNVERIFIED.value,
+    human_confirmed: bool = False,
+    verified: bool = False,
+) -> LearnedAnswer:
     key = normalize_label(label)
     now = dt.datetime.now(dt.timezone.utc)
     existing = session.execute(
@@ -96,6 +107,13 @@ def upsert(session: Session, label: str, field_type: str, value: str, sensitive:
         existing.sensitive = sensitive
         existing.times_used += 1
         existing.last_used_at = now
+        # Trust only ever ratchets up: re-seeing a value on an unverified
+        # form must not erase the fact that it was previously confirmed.
+        existing.provenance = strongest(existing.provenance or Provenance.UNVERIFIED.value, provenance)
+        existing.human_confirmed = bool(existing.human_confirmed or human_confirmed)
+        if verified:
+            existing.verified_submission_count = (existing.verified_submission_count or 0) + 1
+            existing.last_validated_at = now
         return existing
 
     row = LearnedAnswer(
@@ -106,6 +124,10 @@ def upsert(session: Session, label: str, field_type: str, value: str, sensitive:
         sensitive=sensitive,
         times_used=1,
         last_used_at=now,
+        provenance=provenance,
+        human_confirmed=human_confirmed,
+        verified_submission_count=1 if verified else 0,
+        last_validated_at=now if verified else None,
     )
     session.add(row)
     return row
@@ -162,15 +184,29 @@ def clear_failure(session: Session, label: str) -> None:
         session.delete(row)
 
 
-def capture_from_page(session: Session, page: FrameLike, fields: list[FieldSpec]) -> int:
-    """Reads whatever ended up in each field (auto-filled or typed by the
-    human) right before submit and remembers anything eligible. Called
-    regardless of whether the application is actually submitted, so even a
-    field you filled in on a skipped application gets remembered.
+def capture_from_page(
+    session: Session,
+    page: FrameLike,
+    fields: list[FieldSpec],
+    *,
+    verified_submission: bool = False,
+    model_filled_ids: set[int] | None = None,
+) -> int:
+    """Read back whatever ended up in each field and remember it, tagged
+    with how much that value can be trusted.
+
+    `model_filled_ids` are fields the LLM populated on this run. Those are
+    recorded as MODEL_GUESS unless the submission was positively verified;
+    everything else was put there by the candidate and counts as
+    HUMAN_ENTERED. Only the latter is ever eligible to auto-fill a
+    sensitive question later (see learning/provenance.py) — which is what
+    stops a hallucinated work-authorization answer from being replayed onto
+    future applications as though it had been confirmed.
     """
     from jobbot.submit.fill_planner import _ALWAYS_HUMAN_RE  # local import: avoid a submit<->learning cycle at module load
     from jobbot.submit.values import read_field_value
 
+    model_filled_ids = model_filled_ids or set()
     count = 0
     for field in fields:
         if field.field_type == "file":
@@ -178,11 +214,28 @@ def capture_from_page(session: Session, page: FrameLike, fields: list[FieldSpec]
         value = read_field_value(page, field)
         if not eligible_for_learning(field.field_type, value):
             continue
+
+        was_model_filled = field.field_id in model_filled_ids
+        if verified_submission:
+            provenance = Provenance.VERIFIED.value
+        elif was_model_filled:
+            provenance = Provenance.MODEL_GUESS.value
+        else:
+            provenance = Provenance.HUMAN_ENTERED.value
+
         sensitive = bool(_ALWAYS_HUMAN_RE.search(field.label))
-        upsert(session, field.label, field.field_type, value, sensitive)
+        upsert(
+            session, field.label, field.field_type, value, sensitive,
+            provenance=provenance,
+            human_confirmed=not was_model_filled,
+            verified=verified_submission,
+        )
         clear_failure(session, field.label)  # it clearly can be filled now
         count += 1
 
     if count:
-        log.info("Learned/updated %d field answer(s) from this application", count)
+        log.info(
+            "Learned/updated %d field answer(s) from this application (verified=%s)",
+            count, verified_submission,
+        )
     return count
