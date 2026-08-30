@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # _confirm_sensitive_autofill) listing exactly which saved answers will
     # be reused — this flag alone does not silently enable it.
     jobbot_autofill_sensitive: bool = False
+    # When the deterministic path cannot find the application form, hand
+    # the browser to the bounded agent loop to reach it (jobbot/agent/
+    # takeover.py) instead of giving up. The agent operates under the same
+    # policy gate as everything else and can never submit: takeover runs
+    # at Autonomy.NAVIGATE.
+    jobbot_agent_takeover: bool = True
+    # Hard bound on one takeover episode.
+    jobbot_agent_max_steps: int = 12
 
     @property
     def data_dir(self) -> Path:

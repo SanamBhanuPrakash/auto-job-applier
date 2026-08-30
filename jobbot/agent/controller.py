@@ -143,13 +143,23 @@ class AgentRun:
     stop_reason: StopReason | None = None
 
     def summary(self) -> dict:
+        # Order matters: `Trajectory.summary()` also has a "steps" key,
+        # counting only steps that reached execution. Spreading it last
+        # overwrote the controller's own count, so a run that iterated 40
+        # times and was denied every time reported "steps: 0" — the
+        # observability layer hiding exactly the runs worth looking at.
+        # Both numbers are kept, under names that say what they mean.
+        traj = self.trajectory.summary() if self.trajectory else {}
+        traj.pop("steps", None)
         return {
             "outcome": self.outcome.value,
             "reason": self.reason,
             "final_page_state": self.final_state.value,
             "stop_reason": self.stop_reason.value if self.stop_reason else None,
             "steps": len(self.steps),
-            **(self.trajectory.summary() if self.trajectory else {}),
+            "executed_steps": len(self.trajectory.steps) if self.trajectory else 0,
+            "denied_steps": sum(1 for s in self.steps if not s.authorized),
+            **traj,
         }
 
 
@@ -189,6 +199,17 @@ class AgentController:
         known_failures: list[str] = []
 
         while True:
+            # The step budget counts *iterations*, not just actions that
+            # made it past authorization. Counting only executed steps left
+            # the loop unbounded whenever the decider kept proposing
+            # something policy denied: those iterations `continue` without
+            # ever calling `traj.begin_step`, so the ceiling was never
+            # reached. Found by test_agent_takeover.py; §133 forbids an
+            # unbounded loop, so this is a hard count in the controller
+            # rather than a property of what the decider happens to pick.
+            # See browser-agent-failures.md §16.
+            if len(steps) >= self.budget.max_steps:
+                return self._stopped(traj, steps, StopReason.STEP_BUDGET)
             stop = traj.should_stop()
             if stop is not None:
                 return self._stopped(traj, steps, stop)

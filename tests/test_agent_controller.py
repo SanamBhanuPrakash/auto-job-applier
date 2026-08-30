@@ -332,3 +332,67 @@ def test_decider_is_told_what_already_failed(page):
 
     later = decider.seen[-1]
     assert "click" in later.forbidden_actions or later.known_failures
+
+
+# --- budget must bound every iteration, not just the acted-on ones --------
+
+
+def test_a_decider_stuck_on_a_denied_action_still_hits_the_step_budget(page):
+    """Regression: the step budget counted only steps that reached ACT.
+
+    An iteration denied by policy `continue`s without ever calling
+    `traj.begin_step`, so a decider that kept proposing a forbidden action
+    spun past its ceiling — here it ran to 40 iterations against a budget
+    of 5, stopped only by the incidental LLM-call budget. A decider that
+    consumed no LLM calls would not have stopped at all, which §133
+    forbids outright. See browser-agent-failures.md §16.
+    """
+    page.goto((FIXTURES / "application_form.html").as_uri(), wait_until="domcontentloaded")
+
+    class StubbornDecider:
+        """Always asks to fill a field, which NAVIGATE autonomy refuses."""
+
+        def __init__(self):
+            self.calls = 0
+
+        def decide(self, ctx):
+            self.calls += 1
+            box = next(c for c in ctx.observation.controls if c.role == "textbox")
+            return Decision(action="type", args={"ref": box.ref, "value": "x"})
+
+    decider = StubbornDecider()
+    controller = AgentController(ToolRegistry(), decider, budget=Budget(max_steps=5))
+    run = controller.run(
+        "fill the form",
+        ToolContext(page=page, application_state=ApplicationState.FILLING),
+        PolicyContext(application_state=ApplicationState.FILLING, autonomy=Autonomy.NAVIGATE),
+        goal_reached=lambda obs, cls: False,
+    )
+    assert run.stop_reason is StopReason.STEP_BUDGET
+    assert len(run.steps) == 5
+    assert decider.calls == 5
+
+
+def test_the_run_summary_reports_denied_steps_instead_of_hiding_them(page):
+    """Regression: `Trajectory.summary()` was spread last over the run
+    summary, and its own "steps" key (execution-only) overwrote the
+    controller's. A run that iterated repeatedly and was denied every time
+    reported `steps: 0`."""
+    page.goto((FIXTURES / "application_form.html").as_uri(), wait_until="domcontentloaded")
+
+    class DeniedDecider:
+        def decide(self, ctx):
+            box = next(c for c in ctx.observation.controls if c.role == "textbox")
+            return Decision(action="type", args={"ref": box.ref, "value": "x"})
+
+    controller = AgentController(ToolRegistry(), DeniedDecider(), budget=Budget(max_steps=3))
+    run = controller.run(
+        "fill the form",
+        ToolContext(page=page, application_state=ApplicationState.FILLING),
+        PolicyContext(application_state=ApplicationState.FILLING, autonomy=Autonomy.NAVIGATE),
+        goal_reached=lambda obs, cls: False,
+    )
+    summary = run.summary()
+    assert summary["steps"] == 3
+    assert summary["executed_steps"] == 0
+    assert summary["denied_steps"] == 3

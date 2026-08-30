@@ -1,7 +1,7 @@
 # Gap map: spec capability → current tree
 
-Updated as slices land. Current tree: Phases 1-5 complete, 349 tests passing
-(1 skipped). Last assessed after the Phase 3-5 slice.
+Updated as slices land. Current tree: Phases 1-7 complete, 407 tests passing
+(1 skipped). Last assessed after the Phase 6-7 slice.
 
 Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred)
 
@@ -16,7 +16,7 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | Provenance-aware memory | DONE | `learning/provenance.py` |
 | Sensitive-field policy | DONE | `submit/fill_planner.py` (code-level, not prompt-level) |
 | Evidence-based submission verification | DONE | `submit/verify.py` |
-| Failure taxonomy + retry policy | PARTIAL | taxonomy DONE (`states.py`); **not yet wired to real recovery actions** |
+| Failure taxonomy + retry policy | DONE | taxonomy `states.py`; recovery actions `agent/recovery.py` |
 | Checkpoints | PARTIAL | `Application.checkpoint` column exists; not written per step |
 | Tracing | PARTIAL | `StateTransition` DONE; **no per-step agent trace** |
 
@@ -34,7 +34,7 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | `UNKNOWN` as first-class state | DONE | never coerced to keep moving |
 | Vision/screenshot escalation | PARTIAL | tier exists; nothing chooses it automatically yet |
 
-## Agent loop — Phases 3–5 DONE
+## Agent loop — Phases 3–7 DONE
 
 | Capability | Status | Where |
 |---|---|---|
@@ -46,10 +46,14 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | Loop / no-progress detection | DONE | `agent/trajectory.py` |
 | Pluggable `Decider` (LLM is one impl) | DONE | `controller.Decider` protocol |
 | Per-step trace rows | PARTIAL | `StepRecord` in memory; **not yet persisted to DB** |
-| Agent takeover / hand-back | **GAP** (Phase 6) |
-| Recovery engine (closed action set) | **GAP** (Phase 7) |
-| Checkpoint per step | **GAP** — controller does not yet write checkpoints |
+| Agent takeover / hand-back | DONE | `agent/takeover.py`, wired at `submit/takeover_bridge.py` |
+| Recovery engine (closed action set) | DONE | `agent/recovery.py` (15 actions, ladders per trigger) |
+| Capability vs. risk separation | DONE | `tools.Capability` (see failures §15) |
+| Non-LLM decider | DONE | `agent/deciders.HeuristicDecider` |
+| Checkpoint per step | **GAP** — handoff carries one; the loop does not write per-step |
+| Per-step trace persistence | **GAP** — `StepRecord` still in memory only |
 | LLM decider + timeouts/routing | **GAP** (§23, §110, §111) |
+| Recovery engine driven from the deterministic path | **PARTIAL** — engine + ladders exist and are tested; `submit/base.py` currently uses takeover only, not the full ladder |
 
 ## Authentication — GAP (deliberately later)
 
@@ -82,19 +86,26 @@ behaviour, so it ranks above adding more capability.
 2. ~~**Tool registry + `ToolResult` + budgets + authorization + controller**~~
    — DONE (Phases 3–5). Found and fixed a real sensitive-field bypass in the
    process; see browser-agent-failures.md §13.
-3. **Agent takeover / hand-back + recovery engine** (Phases 6–7) ← *next*.
-   The controller exists but nothing calls it yet: wiring takeover into
-   `submit/base.py` is what turns it from a capability into behaviour.
-4. Prompt-injection channel separation (Phase 8) — still a live gap: job
-   descriptions and scraped labels reach prompts undelimited.
+3. ~~**Agent takeover / hand-back + recovery engine**~~ — DONE (Phases 6–7).
+   `submit/base.py` now hands the browser to the agent when the form scan
+   comes up empty, and never walks an empty form to READY_TO_SUBMIT again.
+   Found three real defects on the way: failures §14, §15, §16.
+4. **Prompt-injection channel separation** (Phase 8) ← *next*. Still a live
+   gap: job descriptions and scraped labels reach prompts undelimited.
 5. Fault-injection evaluation harness (Phase 9). Ranked high: per
    browser-agent-failures.md §1 this is what predicts production behaviour.
+   Phases 6–7 raise its value again — recovery ladders and takeover are
+   exactly what fault injection measures, and they are currently tested
+   against fixtures rather than injected faults.
 6. Browser identity/profile isolation (Phase 10) — fixes the concurrency gap.
-7. Auth orchestrator (Phases 11–14).
+7. Auth orchestrator (Phases 11–14). `REAUTHENTICATE` is the one recovery
+   action that reports itself unavailable; this is what fills it in.
 8. Structured `JobRequirements`; location normalization; search discovery.
 
-Playwright MCP (spec §62/§121) is now *unblocked* — `ToolResult` and the
-registry exist, so MCP can be added as one more actuator behind the same
-contract. It is still deferred behind takeover/recovery, because without
-those an alternative actuator has nothing distinctive to do: MCP earns its
-place on novel UI and difficult recovery (§64), which is Phase 6–7 work.
+Playwright MCP (spec §62/§121) is unblocked and now has somewhere to
+plug in: `ToolResult`, the registry, and a `Decider` protocol all exist,
+so MCP is one more actuator behind the same contract and one more decider
+behind the same authorization. It stays deferred behind Phase 9 for a
+different reason than before — an alternative actuator is only worth
+adding once fault injection can measure whether it actually recovers
+better than the heuristic path it would replace (§64).

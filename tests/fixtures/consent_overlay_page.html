@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Staff Engineer — Acme</title>
+<style>
+  #consent { position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 9999;
+             display: flex; align-items: center; justify-content: center; }
+  #consent .box { background: #fff; padding: 2rem; }
+</style>
+</head>
+<body>
+  <h1>Staff Engineer</h1>
+  <p>Join the platform team.</p>
+  <a href="./application_form.html" id="apply">Apply for this job</a>
+
+  <!-- A full-viewport consent overlay: the Apply link below it is in the
+       DOM and "visible", but every click lands on the overlay instead.
+       This is the shape that makes a naive "click Apply" agent loop. -->
+  <div id="consent">
+    <div class="box">
+      <p>We use cookies.</p>
+      <button type="button" id="accept" onclick="document.getElementById('consent').remove()">Accept all</button>
+      <button type="button" id="reject" onclick="document.getElementById('consent').remove()">Reject all</button>
+      <button type="button" id="settings">Cookie settings</button>
+    </div>
+  </div>
+</body></html>

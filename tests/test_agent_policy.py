@@ -63,9 +63,57 @@ def test_observe_only_run_cannot_click():
 
 
 def test_navigate_level_can_move_but_not_fill():
+    """The guarantee the name states: movement yes, writing no.
+
+    This originally asserted that `navigate` itself was denied at NAVIGATE
+    autonomy — true under the old single-axis model, where the ceiling was
+    a risk class and `navigate` (MEDIUM_RISK) sat above it. That made the
+    level unable to navigate, which is why capability is now its own axis
+    (browser-agent-failures.md §15). The guarantee is unchanged and now
+    asserted directly against a filling tool.
+    """
     p = _policy(autonomy=Autonomy.NAVIGATE, application_state=S.OPENING_APPLICATION)
     assert authorize(_spec("scroll"), {"direction": "down"}, p).allowed is True
-    assert authorize(_spec("navigate"), {"url": "https://x/y"}, p).allowed is False
+    assert authorize(_spec("navigate"), {"url": "https://x/y"}, p).allowed is True
+    assert authorize(_spec("click"), {"ref": "o1"}, p).allowed is True
+
+    filling = _policy(autonomy=Autonomy.NAVIGATE, application_state=S.FILLING)
+    for tool, kwargs in (("type", {"ref": "o1", "value": "Ada"}),
+                         ("select", {"ref": "o1", "value": "Yes"}),
+                         ("check", {"ref": "o1"}),
+                         ("upload", {"ref": "o1", "path": "/tmp/r.pdf"})):
+        assert authorize(_spec(tool), kwargs, filling).allowed is False, tool
+
+
+def test_clicking_a_form_control_counts_as_filling_it():
+    """A click on a radio answers a question. Declaring `click` NAVIGATE
+    and stopping there would let a NAVIGATE run tick the work-authorization
+    box — failures §13 one layer up. See failures §15."""
+    ctx = ToolContext(page=None)
+    obs = _obs(Control(ref="o1", role="radio", name="Yes",
+                       group="Are you legally authorized to work in the United States?"))
+    p = _policy(autonomy=Autonomy.NAVIGATE)
+    d = authorize(_spec("click"), {"ref": "o1"}, p, tool_ctx=ctx, observation=obs)
+    assert d.allowed is False
+    assert "NAVIGATE" in d.reason or "sensitive" in d.reason
+
+
+def test_clicking_a_sensitive_radio_is_refused_even_at_fill_autonomy():
+    ctx = ToolContext(page=None)
+    obs = _obs(Control(ref="o1", role="radio", name="Yes",
+                       group="Will you now or in the future require visa sponsorship?"))
+    d = authorize(_spec("click"), {"ref": "o1"}, _policy(autonomy=Autonomy.FILL),
+                  tool_ctx=ctx, observation=obs)
+    assert d.allowed is False
+    assert d.requires_human is True
+
+
+def test_clicking_an_ordinary_button_is_still_navigation():
+    ctx = ToolContext(page=None)
+    obs = _obs(Control(ref="o1", role="button", name="Apply for this job"))
+    assert authorize(_spec("click"), {"ref": "o1"},
+                     _policy(autonomy=Autonomy.NAVIGATE, application_state=S.OPENING_APPLICATION),
+                     tool_ctx=ctx, observation=obs).allowed is True
 
 
 def test_fill_level_cannot_submit():

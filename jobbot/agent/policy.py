@@ -31,12 +31,18 @@ from enum import IntEnum
 from jobbot.agent.observation import BrowserObservation
 from jobbot.agent.page_classify import PageState, requires_stop
 from jobbot.agent.states import ApplicationState, FailureCategory
-from jobbot.agent.tools import RiskClass, ToolContext, ToolSpec
+from jobbot.agent.tools import Capability, RiskClass, ToolContext, ToolSpec
 from jobbot.submit.fill_planner import is_sensitive
 
 
 class Autonomy(IntEnum):
-    """How much the operator has authorized this run to do unattended."""
+    """How much the operator has authorized this run to do unattended.
+
+    Values line up 1:1 with `Capability`, which is the point: an autonomy
+    level is a ceiling on the *kind* of action, not on how consequential
+    any single action is. Risk class still governs escalation, blocking
+    pages and the submission gate below.
+    """
 
     OBSERVE_ONLY = 0      # read the page, decide nothing consequential
     NAVIGATE = 1          # move around, but do not write into forms
@@ -87,6 +93,39 @@ _CREDENTIAL_FIELD = re.compile(
 )
 
 
+#: Roles where "clicking" is really "answering". A click on one of these
+#: is a fill, whatever the tool is called.
+_INPUT_ROLES = frozenset({
+    "textbox", "combobox", "checkbox", "radio", "select", "listbox", "slider",
+    "spinbutton", "switch", "searchbox", "file",
+})
+
+
+def _control_for(ref: str, observation: BrowserObservation | None):
+    if not ref or observation is None:
+        return None
+    for control in observation.controls:
+        if control.ref == ref:
+            return control
+    return None
+
+
+def _effective_capability(spec: ToolSpec, control) -> Capability:
+    """A tool's declared capability, escalated by what it is aimed at.
+
+    `click` is declared NAVIGATE because pressing "Apply" is navigation.
+    Pointed at a radio in the work-authorization group it is a fill, and
+    treating it as navigation would let a NAVIGATE-autonomy run answer a
+    sensitive question — the same class of hole as failures §13, one layer
+    up. Capability is therefore a function of the target, not just the
+    tool.
+    """
+    if spec.capability is Capability.NAVIGATE and control is not None:
+        if control.role in _INPUT_ROLES:
+            return Capability.FILL
+    return spec.capability
+
+
 def _field_name_for(ctx: ToolContext, ref: str, observation: BrowserObservation | None) -> str:
     """The label a policy decision is made against.
 
@@ -124,16 +163,20 @@ def authorize(
             human=True, category=FailureCategory.BLOCKED,
         )
 
-    # 2. Autonomy ceiling for this run.
-    ceiling = {
-        Autonomy.OBSERVE_ONLY: RiskClass.READ_ONLY,
-        Autonomy.NAVIGATE: RiskClass.LOW_RISK,
-        Autonomy.FILL: RiskClass.HIGH_RISK,
-        Autonomy.FULL: RiskClass.EXTERNAL_SIDE_EFFECT,
-    }[policy.autonomy]
-    if spec.risk_class > ceiling:
+    # 2. Autonomy ceiling for this run, on the capability axis.
+    ref = str(args.get("ref", ""))
+    control = _control_for(ref, observation)
+    capability = _effective_capability(spec, control)
+    if capability.value > policy.autonomy.value:
         return PolicyDecision.deny(
-            f"{spec.name} is {spec.risk_class.name}, above this run's autonomy ({policy.autonomy.name})",
+            f"{spec.name} is a {capability.name} action, above this run's autonomy "
+            f"({policy.autonomy.name})",
+        )
+    # Submission stays gated on risk class as well: nothing below FULL may
+    # reach the employer even if a tool were mislabelled.
+    if spec.risk_class is RiskClass.EXTERNAL_SIDE_EFFECT and policy.autonomy < Autonomy.FULL:
+        return PolicyDecision.deny(
+            f"{spec.name} reaches the employer; this run's autonomy is {policy.autonomy.name}",
         )
 
     # 3. The tool must be legal in the current application state (§40).
@@ -157,9 +200,11 @@ def authorize(
             )
 
     # 5. Credential material never goes through a generic tool (§26, §60).
-    ref = str(args.get("ref", ""))
-    field_name = _field_name_for(tool_ctx, ref, observation) if tool_ctx else ""
-    if spec.name in ("type", "select", "check") and field_name:
+    #    `click` is included: clicking a radio's label sets an answer just
+    #    as surely as `check` does, and a rule that names only the
+    #    obviously-filling tools is a rule with a click-shaped hole in it.
+    field_name = control.semantic_label if control is not None else ""
+    if capability is Capability.FILL and field_name:
         if _CREDENTIAL_FIELD.search(field_name):
             return PolicyDecision.deny(
                 f"{field_name!r} is a credential/verification field; it must be handled by the "

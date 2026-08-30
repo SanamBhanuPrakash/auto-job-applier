@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from jobbot.agent import statestore
 from jobbot.agent.states import ApplicationState, FailureCategory
@@ -49,6 +49,7 @@ from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
 from jobbot.submit.review import show_review, wait_for_submit_or_close
 from jobbot.submit.static_answers import resolve_static_fields
+from jobbot.submit.takeover_bridge import reach_application_form
 from jobbot.submit.verify import SubmissionVerdict, detect_blocking, verify_submission
 
 log = logging.getLogger(__name__)
@@ -162,11 +163,53 @@ def apply_to_job(
                       category=FailureCategory.BLOCKED, run_id=run_id)
                 return _reload(app_id)
 
-            form_ctx = find_target_frame(page, ats_module.ATS_HINT)
+            # A form may genuinely not be here yet: many postings put it
+            # behind an "Apply" button, and some employers render it in an
+            # iframe that hydrates late. A timeout is a signal to look
+            # harder (agent takeover, below), not a reason to fail the
+            # attempt outright.
+            try:
+                form_ctx = find_target_frame(page, ats_module.ATS_HINT)
+                form_located = True
+            except PlaywrightTimeoutError:
+                log.info("No form found on %s within the timeout; will try agent takeover", job.url)
+                form_ctx, form_located = page, False
             ats_module.settle(page)
 
-            _park(app_id, ApplicationState.INSPECTING_FORM, reason="form located", run_id=run_id)
-            fields = scan_form(form_ctx)
+            _park(app_id, ApplicationState.INSPECTING_FORM,
+                  reason="form located" if form_located else "no form found yet", run_id=run_id)
+            fields = scan_form(form_ctx) if form_located else []
+
+            # --- agent takeover (§16) -----------------------------------
+            # No fields means the deterministic path is not looking at the
+            # application: the form is behind an Apply button, in another
+            # frame, or under a consent overlay. Continuing from here would
+            # walk an empty form all the way to READY_TO_SUBMIT, so this is
+            # exactly the "unfamiliar situation before a fatal failure"
+            # takeover exists for. The agent runs at NAVIGATE autonomy, so
+            # it can move around but can neither fill nor submit.
+            if not fields:
+                handoff, form_ctx, fields = reach_application_form(
+                    page, form_ctx, app_id=app_id, run_id=run_id,
+                    ats_hint=ats_module.ATS_HINT,
+                )
+                if handoff is not None and not handoff.resolved:
+                    _park(
+                        app_id,
+                        ApplicationState.BLOCKED if handoff.outcome.value == "BLOCKED"
+                        else ApplicationState.HUMAN_REVIEW,
+                        reason=f"agent takeover did not reach a form: {handoff.reason}"[:500],
+                        category=handoff.failure_category or FailureCategory.RECOVERABLE,
+                        run_id=run_id, detail=handoff.to_dict(),
+                    )
+                    return _reload(app_id)
+            if not fields:
+                # Takeover disabled, or it resolved but the re-scan still
+                # found nothing. Never proceed to submit an empty form.
+                _park(app_id, ApplicationState.HUMAN_REVIEW,
+                      reason="no form fields found on the application page",
+                      category=FailureCategory.RECOVERABLE, run_id=run_id)
+                return _reload(app_id)
             # Kept short for the same reason matching/score.py truncates
             # descriptions — Groq's free-tier 6,000 tokens/minute cap.
             job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:800]}"

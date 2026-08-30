@@ -195,6 +195,103 @@ volume, and benchmark scores do not measure this.
   `test_credential_rule_also_sees_group_context`, and
   `test_benign_radio_group_is_still_allowed` (guards against over-blocking).
 
+## 14. Absence of evidence reported as successful recovery
+
+- **Reproduced:** in this repo, by
+  `test_agent_recovery.py::test_a_degraded_reobserve_is_not_reported_as_a_successful_recovery`
+  during the Phase 6-7 slice.
+- **Root cause:** `RecoveryEngine.execute(REOBSERVE)` returned
+  `executed=True, retry_operation=True` whenever `observe()` returned —
+  but `observe()` never raises. It catches per-tier failures and returns a
+  **degraded** observation with notes explaining what could not be read.
+  So a page that answered nothing at all produced "recovered, go ahead and
+  retry", and the recovery ladder advanced a rung on the strength of a
+  read where nothing was read. The same shape applied to `REGROUND`
+  returning zero fields.
+- **Why it matters:** it inverts the ladder. The escalation order exists
+  so that a cheap action gets one chance before a more consequential one;
+  a rung that always "succeeds" means the ladder never escalates, and the
+  caller retries the same broken operation until a budget stops it.
+- **Lesson:** this is the third appearance of one bug in this repo — a
+  submission verdict from a page that showed nothing (§3), a page
+  classification scored on an empty observation, and now a recovery step.
+  Every one had the same shape: **a function that cannot fail is not
+  evidence that anything worked.** For any operation whose result feeds a
+  decision, the success predicate must name what was actually observed,
+  never merely that the call returned.
+- **Our response:** `REOBSERVE` returns `executed=False` when
+  `observation.degraded` is set, carrying the notes as evidence;
+  `REGROUND` returns `executed=False` when it bound zero fields. Both
+  therefore escalate. Regression tests as above, plus
+  `test_a_recovery_action_that_raises_does_not_crash_the_attempt` covering
+  every browser-level action.
+
+## 15. One ordinal for two different questions (risk vs. capability)
+
+- **Reproduced:** in this repo, by `test_agent_takeover.py` during the
+  Phase 6-7 slice: agent takeover ran to its budget on a page whose only
+  useful move was clicking "Apply for this job", having been denied on
+  every single iteration.
+- **Root cause:** `Autonomy` was compared directly against `RiskClass`.
+  `NAVIGATE` mapped to a `LOW_RISK` ceiling, and `click` is `MEDIUM_RISK`
+  — so the autonomy level named "move around the site" could not press a
+  link. Raising the ceiling to `MEDIUM_RISK` would have admitted `type`,
+  `select` and `check` too, since those are also `MEDIUM_RISK`. There was
+  no setting of the dial that expressed "may move, may not fill".
+- **Root cause behind the root cause:** risk class answers *how
+  consequential is this action*; autonomy answers *what kind of action may
+  this run take*. They are independent axes, and `click` and `type` are
+  the case that proves it — equally consequential, categorically
+  different. Collapsing them into one ordinal made a coherent permission
+  level unrepresentable.
+- **A second hole in the same place:** declaring `click` NAVIGATE and
+  stopping there would let a navigation-autonomy run tick the work
+  authorization radio, because clicking a radio's label answers the
+  question exactly as `check` does. This is §13 one layer up: there the
+  unit of meaning was the control *plus its group*, here the unit is the
+  tool *plus its target*.
+- **Lesson:** when a permission check compares two enums, make sure they
+  are answering the same question. And a capability is a property of the
+  action **and what it is aimed at**, never of the tool name alone.
+- **Our response:** `Capability` (OBSERVE / NAVIGATE / FILL / SUBMIT) is
+  its own axis on `ToolSpec`, aligned 1:1 with `Autonomy`; risk class
+  still governs escalation, blocking pages and the submission gate.
+  `policy._effective_capability()` escalates `click` to FILL when its
+  target is an input role, so the credential and sensitive-field rules
+  cover clicks. `press_key` is restricted to a navigation-key allowlist,
+  since `press_key("a")` repeated is text entry wearing a navigation
+  label. Regression tests: `test_clicking_a_form_control_counts_as_filling_it`,
+  `test_clicking_a_sensitive_radio_is_refused_even_at_fill_autonomy`,
+  `test_clicking_an_ordinary_button_is_still_navigation`.
+
+## 16. A budget that counts the wrong thing is not a bound
+
+- **Reproduced:** in this repo, by
+  `test_agent_controller.py::test_a_decider_stuck_on_a_denied_action_still_hits_the_step_budget`.
+  A controller given `max_steps=5` ran **40 iterations**.
+- **Root cause:** the step budget counted `Trajectory.steps`, and
+  `trajectory.begin_step()` is only called *after* a decision passes
+  authorization. Every iteration denied by policy — or naming an unknown
+  tool — `continue`s before that point, so it cost nothing against the
+  ceiling. The run was eventually stopped by the LLM-call budget, which is
+  incidental: a decider that consumed no LLM calls (a scripted one, a
+  cached one, a local one) would not have been stopped at all.
+- **Why it hid:** the loop *looked* bounded, the budget *was* enforced,
+  and the tests that existed all used deciders whose actions were
+  authorized — so every iteration incremented the counter and the ceiling
+  worked. The bug only appears when the agent is being refused, which is
+  precisely the situation budgets exist for.
+- **Lesson:** a bound must be counted on the thing that repeats — the
+  loop iteration — not on the thing the loop is *trying* to do. Test every
+  budget with a workload that fails, not one that succeeds.
+- **Our response:** the controller checks `len(steps) >= budget.max_steps`
+  at the top of every iteration, independently of the trajectory. Related
+  observability fix in the same place: `AgentRun.summary()` spread
+  `Trajectory.summary()` last, whose own `steps` key overwrote the
+  controller's count — so a run that iterated 40 times and was denied
+  every time reported `steps: 0`. Both numbers are now reported, as
+  `steps`, `executed_steps` and `denied_steps`.
+
 ---
 
 ## Template for new entries

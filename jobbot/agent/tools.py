@@ -38,13 +38,34 @@ log = logging.getLogger(__name__)
 
 
 class RiskClass(IntEnum):
-    """§11. Ordered so policy can compare against an autonomy ceiling."""
+    """§11. How consequential an action is, ordered for escalation."""
 
     READ_ONLY = 0            # observe, classify
     LOW_RISK = 1             # scroll, wait, switch frame/tab
     MEDIUM_RISK = 2          # fill a candidate field, click, navigate
     HIGH_RISK = 3            # credential entry, file upload
     EXTERNAL_SIDE_EFFECT = 4 # submit: reaches the employer, cannot be undone
+
+
+class Capability(IntEnum):
+    """*What kind* of thing a tool does — the axis an autonomy level gates.
+
+    Deliberately separate from `RiskClass`, which says *how consequential*
+    an action is. Collapsing the two into one ordinal looks tidy and is
+    wrong: `click` and `type` are equally consequential (both MEDIUM_RISK),
+    yet "move around the site without filling anything in" is a coherent
+    and useful permission level. With a single axis, a NAVIGATE ceiling
+    that admits `click` must also admit `type`, and one that excludes
+    `type` also excludes `click` — leaving NAVIGATE unable to press an
+    "Apply" button, i.e. unable to navigate.
+
+    Found by test_agent_takeover.py; see browser-agent-failures.md §15.
+    """
+
+    OBSERVE = 0    # look, wait, scroll — changes nothing
+    NAVIGATE = 1   # move: click, follow links, frames, tabs, history
+    FILL = 2       # write a value into the page
+    SUBMIT = 3     # hand the application to the employer
 
 
 @dataclass
@@ -93,6 +114,9 @@ class ToolSpec:
     purpose: str
     risk_class: RiskClass
     handler: Callable[..., dict]
+    #: The autonomy axis (see Capability). Defaults to FILL so that a tool
+    #: added without thinking about it is gated more tightly, not less.
+    capability: Capability = Capability.FILL
     #: Empty means "any state". Otherwise the application must be in one of
     #: these for the tool to be authorized (§40).
     required_states: frozenset[ApplicationState] = frozenset()
@@ -113,6 +137,7 @@ class ToolSpec:
             "name": self.name,
             "purpose": self.purpose,
             "risk": self.risk_class.name,
+            "capability": self.capability.name,
             "args": list(self.args),
             "required_args": list(self.required_args),
         }
@@ -256,9 +281,27 @@ def _h_scroll(ctx: ToolContext, direction: str = "down", **_: Any) -> dict:
     return {"direction": direction}
 
 
+#: `press_key` is classified NAVIGATE, so it must not be able to write into
+#: a focused field — `press_key("a")` repeated is text entry wearing a
+#: navigation label, and would route around both the fill autonomy level
+#: and the sensitive-field guardrail. Only keys that move or activate are
+#: allowed; anything that produces a character is refused.
+_NAVIGATION_KEYS = frozenset({
+    "Enter", "Tab", "Escape", "Space", "PageDown", "PageUp", "Home", "End",
+    "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight",
+    "Shift+Tab", "Control+Home", "Control+End",
+})
+
+
 def _h_press_key(ctx: ToolContext, key: str = "", **_: Any) -> dict:
     if not key:
         raise ToolError("press_key requires a key", FailureCategory.POLICY, recoverable=False)
+    if key not in _NAVIGATION_KEYS:
+        raise ToolError(
+            f"{key!r} is not a navigation key; typing text must go through the "
+            "`type` tool, which is authorized and verified as a fill",
+            FailureCategory.POLICY, recoverable=False,
+        )
     ctx.page.keyboard.press(key)
     return {"key": key}
 
@@ -460,48 +503,49 @@ _NAV_STATES = frozenset({
 
 def default_tools() -> list[ToolSpec]:
     R = RiskClass
+    C = Capability
     F = FailureCategory
     return [
-        ToolSpec("observe", "Re-read the current page state.", R.READ_ONLY, _h_observe,
+        ToolSpec("observe", "Re-read the current page state.", R.READ_ONLY, _h_observe, capability=C.OBSERVE,
                  verification="n/a - read only"),
-        ToolSpec("classify_page", "Determine what kind of page this is.", R.READ_ONLY, _h_classify_page,
+        ToolSpec("classify_page", "Determine what kind of page this is.", R.READ_ONLY, _h_classify_page, capability=C.OBSERVE,
                  verification="n/a - read only"),
-        ToolSpec("wait", "Pause briefly for the page to settle (max 10s).", R.LOW_RISK, _h_wait,
+        ToolSpec("wait", "Pause briefly for the page to settle (max 10s).", R.LOW_RISK, _h_wait, capability=C.OBSERVE,
                  args=("seconds",)),
-        ToolSpec("scroll", "Scroll the page up or down.", R.LOW_RISK, _h_scroll, args=("direction",)),
+        ToolSpec("scroll", "Scroll the page up or down.", R.LOW_RISK, _h_scroll, capability=C.OBSERVE, args=("direction",)),
         ToolSpec("switch_frame", "Move into the iframe that holds the form.", R.LOW_RISK,
-                 _h_switch_frame, args=("url_contains",), failure_categories=(F.RECOVERABLE,)),
-        ToolSpec("switch_tab", "Switch to another open browser tab.", R.LOW_RISK, _h_switch_tab,
+                 _h_switch_frame, capability=C.NAVIGATE, args=("url_contains",), failure_categories=(F.RECOVERABLE,)),
+        ToolSpec("switch_tab", "Switch to another open browser tab.", R.LOW_RISK, _h_switch_tab, capability=C.NAVIGATE,
                  args=("index",), failure_categories=(F.RECOVERABLE,)),
-        ToolSpec("close_tab", "Close a browser tab.", R.LOW_RISK, _h_close_tab, args=("index",)),
-        ToolSpec("press_key", "Press a keyboard key.", R.LOW_RISK, _h_press_key,
+        ToolSpec("close_tab", "Close a browser tab.", R.LOW_RISK, _h_close_tab, capability=C.NAVIGATE, args=("index",)),
+        ToolSpec("press_key", "Press a keyboard key.", R.LOW_RISK, _h_press_key, capability=C.NAVIGATE,
                  args=("key",), required_args=("key",)),
 
-        ToolSpec("navigate", "Open a URL.", R.MEDIUM_RISK, _h_navigate,
+        ToolSpec("navigate", "Open a URL.", R.MEDIUM_RISK, _h_navigate, capability=C.NAVIGATE,
                  args=("url",), required_args=("url",), required_states=_NAV_STATES,
                  side_effects="leaves the current page; any unsaved form input is lost",
                  failure_categories=(F.TRANSIENT, F.POLICY)),
-        ToolSpec("back", "Go back one page.", R.MEDIUM_RISK, _h_back, required_states=_NAV_STATES),
-        ToolSpec("reload", "Reload the current page.", R.MEDIUM_RISK, _h_reload,
+        ToolSpec("back", "Go back one page.", R.MEDIUM_RISK, _h_back, capability=C.NAVIGATE, required_states=_NAV_STATES),
+        ToolSpec("reload", "Reload the current page.", R.MEDIUM_RISK, _h_reload, capability=C.NAVIGATE,
                  required_states=_NAV_STATES),
-        ToolSpec("click", "Click a control by its ref.", R.MEDIUM_RISK, _h_click,
+        ToolSpec("click", "Click a control by its ref.", R.MEDIUM_RISK, _h_click, capability=C.NAVIGATE,
                  args=("ref",), required_args=("ref",),
                  side_effects="may navigate, open a modal, or submit",
                  failure_categories=(F.RECOVERABLE,)),
-        ToolSpec("type", "Type a value into a field.", R.MEDIUM_RISK, _h_type,
+        ToolSpec("type", "Type a value into a field.", R.MEDIUM_RISK, _h_type, capability=C.FILL,
                  args=("ref", "value"), required_args=("ref",), required_states=_FORM_STATES,
                  verification="value is read back from the field after typing",
                  failure_categories=(F.RECOVERABLE,)),
-        ToolSpec("clear", "Empty a field.", R.MEDIUM_RISK, _h_clear,
+        ToolSpec("clear", "Empty a field.", R.MEDIUM_RISK, _h_clear, capability=C.FILL,
                  args=("ref",), required_args=("ref",), required_states=_FORM_STATES),
-        ToolSpec("select", "Choose an option in a dropdown.", R.MEDIUM_RISK, _h_select,
+        ToolSpec("select", "Choose an option in a dropdown.", R.MEDIUM_RISK, _h_select, capability=C.FILL,
                  args=("ref", "value"), required_args=("ref", "value"), required_states=_FORM_STATES),
-        ToolSpec("check", "Tick a checkbox or radio.", R.MEDIUM_RISK, _h_check,
+        ToolSpec("check", "Tick a checkbox or radio.", R.MEDIUM_RISK, _h_check, capability=C.FILL,
                  args=("ref",), required_args=("ref",), required_states=_FORM_STATES),
-        ToolSpec("uncheck", "Untick a checkbox.", R.MEDIUM_RISK, _h_uncheck,
+        ToolSpec("uncheck", "Untick a checkbox.", R.MEDIUM_RISK, _h_uncheck, capability=C.FILL,
                  args=("ref",), required_args=("ref",), required_states=_FORM_STATES),
 
-        ToolSpec("upload", "Attach an approved candidate document.", R.HIGH_RISK, _h_upload,
+        ToolSpec("upload", "Attach an approved candidate document.", R.HIGH_RISK, _h_upload, capability=C.FILL,
                  args=("ref", "path"), required_args=("ref", "path"), required_states=_FORM_STATES,
                  side_effects="uploads a file to the employer",
                  verification="file input reports an attached file",
