@@ -1,7 +1,7 @@
 # Gap map: spec capability → current tree
 
-Assessed against the merged tree at `ba1f55f` (215 tests passing). Updated as
-slices land.
+Updated as slices land. Current tree: Phases 1-5 complete, 349 tests passing
+(1 skipped). Last assessed after the Phase 3-5 slice.
 
 Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred)
 
@@ -20,30 +20,36 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | Checkpoints | PARTIAL | `Application.checkpoint` column exists; not written per step |
 | Tracing | PARTIAL | `StateTransition` DONE; **no per-step agent trace** |
 
-## Perception — the foundational GAP (this slice)
+## Perception — Phase 2 DONE
 
-| Capability | Status | Note |
+| Capability | Status | Where |
 |---|---|---|
-| BrowserObservation abstraction | **GAP** | nothing exists |
-| Tiered/hierarchical perception | **GAP** | `form_scan` dumps all fields at one level |
-| Accessibility tree | **GAP** | `aria_snapshot()` verified available, unused |
-| Frames enumerated | PARTIAL | `find_target_frame` finds one; doesn't enumerate |
-| Tabs / dialogs | **GAP** | |
-| State digest | **GAP** | prerequisite for loop detection |
-| Page classification | **GAP** | code assumes it is already on an application form |
-| `UNKNOWN` as first-class state | PARTIAL | exists in `ApplicationState`, not in page classification |
+| BrowserObservation abstraction | DONE | `agent/observation.py` |
+| Tiered perception (METADATA→CONTROLS→ARIA→DOM→SCREENSHOT) | DONE | `Detail` |
+| Accessibility tree | DONE | `aria_snapshot()`, ~5x smaller than raw HTML |
+| Frames / tabs / dialogs enumerated | DONE | observation metadata tier |
+| Group-aware control labels | DONE | `Control.group` / `semantic_label` (see failures §13) |
+| State digest | DONE | feeds loop detection |
+| Page classification (20 states) | DONE | `agent/page_classify.py` |
+| `UNKNOWN` as first-class state | DONE | never coerced to keep moving |
+| Vision/screenshot escalation | PARTIAL | tier exists; nothing chooses it automatically yet |
 
-## Agent loop — GAP (next slice)
+## Agent loop — Phases 3–5 DONE
 
-| Capability | Status |
-|---|---|
-| Agent controller (OBSERVE→DECIDE→ACT→VERIFY→CHECKPOINT) | **GAP** |
-| Typed tool registry + uniform `ToolResult` | **GAP** |
-| Action risk classes | **GAP** |
-| Step/time/token budgets | **GAP** — no budget of any kind exists |
-| Loop / no-progress detection | **GAP** (this slice) |
-| Agent takeover / hand-back | **GAP** |
-| Recovery engine (closed action set) | **GAP** |
+| Capability | Status | Where |
+|---|---|---|
+| Agent controller (OBSERVE→DECIDE→ACT→VERIFY→CHECKPOINT) | DONE | `agent/controller.py` |
+| Typed tool registry + uniform `ToolResult` | DONE | `agent/tools.py` (18 tools) |
+| Action risk classes | DONE | `RiskClass`, enforced in `policy.py` |
+| Tool authorization (§40) | DONE | `agent/policy.py` |
+| Step/time/token/LLM/recovery budgets | DONE | `Budget`, enforced by the controller |
+| Loop / no-progress detection | DONE | `agent/trajectory.py` |
+| Pluggable `Decider` (LLM is one impl) | DONE | `controller.Decider` protocol |
+| Per-step trace rows | PARTIAL | `StepRecord` in memory; **not yet persisted to DB** |
+| Agent takeover / hand-back | **GAP** (Phase 6) |
+| Recovery engine (closed action set) | **GAP** (Phase 7) |
+| Checkpoint per step | **GAP** — controller does not yet write checkpoints |
+| LLM decider + timeouts/routing | **GAP** (§23, §110, §111) |
 
 ## Authentication — GAP (deliberately later)
 
@@ -72,17 +78,23 @@ behaviour, so it ranks above adding more capability.
 
 ## Chosen slice order (smallest change first, each independently useful)
 
-1. **Perception** ← *this slice*. Everything else consumes it; building the
-   loop first would mean rewriting it against a real observation type.
-2. Tool registry + `ToolResult` + budgets + agent controller.
-3. Recovery engine wired to the existing failure taxonomy + takeover/hand-back.
-4. Prompt-injection channel separation (closes a live gap).
-5. Evaluation harness with fault injection.
-6. Browser identity/profile isolation (fixes the concurrency gap above).
-7. Auth orchestrator.
+1. ~~**Perception**~~ — DONE (`da5804a`).
+2. ~~**Tool registry + `ToolResult` + budgets + authorization + controller**~~
+   — DONE (Phases 3–5). Found and fixed a real sensitive-field bypass in the
+   process; see browser-agent-failures.md §13.
+3. **Agent takeover / hand-back + recovery engine** (Phases 6–7) ← *next*.
+   The controller exists but nothing calls it yet: wiring takeover into
+   `submit/base.py` is what turns it from a capability into behaviour.
+4. Prompt-injection channel separation (Phase 8) — still a live gap: job
+   descriptions and scraped labels reach prompts undelimited.
+5. Fault-injection evaluation harness (Phase 9). Ranked high: per
+   browser-agent-failures.md §1 this is what predicts production behaviour.
+6. Browser identity/profile isolation (Phase 10) — fixes the concurrency gap.
+7. Auth orchestrator (Phases 11–14).
 8. Structured `JobRequirements`; location normalization; search discovery.
 
-Playwright MCP is deferred until (2) exists: it is an *alternative actuator*
-behind the same `ToolResult` contract, and adding it before that contract
-exists would couple the agent to an external interface instead of to our own
-tool boundary.
+Playwright MCP (spec §62/§121) is now *unblocked* — `ToolResult` and the
+registry exist, so MCP can be added as one more actuator behind the same
+contract. It is still deferred behind takeover/recovery, because without
+those an alternative actuator has nothing distinctive to do: MCP earns its
+place on novel UI and difficult recovery (§64), which is Phase 6–7 work.

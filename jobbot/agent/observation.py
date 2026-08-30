@@ -72,9 +72,27 @@ class Control:
     value: str = ""
     enabled: bool = True
     required: bool = False
+    #: The enclosing fieldset legend / ARIA group label, when there is one.
+    #:
+    #: Load-bearing for safety, not cosmetic. A radio inside
+    #: `<fieldset><legend>Are you authorized to work in the US?</legend>`
+    #: has the accessible name "Yes" — the *question* lives only on the
+    #: group. Sensitive questions (work authorization, sponsorship, veteran,
+    #: disability, EEOC) are almost always rendered exactly that way, so a
+    #: policy check that looked at `name` alone would miss all of them.
+    #: See docs/research/browser-agent-failures.md §13.
+    group: str = ""
+
+    @property
+    def semantic_label(self) -> str:
+        """Name plus its group context — what any policy or field-semantics
+        decision should be made against."""
+        return f"{self.group} {self.name}".strip() if self.group else self.name
 
     def to_dict(self) -> dict:
         d = {"ref": self.ref, "role": self.role, "name": self.name}
+        if self.group:
+            d["group"] = self.group
         if self.value:
             d["value"] = self.value
         if not self.enabled:
@@ -143,10 +161,13 @@ class BrowserObservation:
             "dialog" if self.dialog_open else "",
             "form" if self.has_form else "",
         ]
-        for c in sorted(self.controls, key=lambda c: (c.role, c.name)):
+        for c in sorted(self.controls, key=lambda c: (c.role, c.group, c.name)):
             # Include the value: typing into a field IS progress, even
-            # though the set of controls is unchanged.
-            parts.append(f"{c.role}|{c.name}|{c.value}|{int(c.enabled)}")
+            # though the set of controls is unchanged. Include the group so
+            # a conditional section swapping in a different question counts
+            # as a state change even when the option labels ("Yes"/"No")
+            # are identical.
+            parts.append(f"{c.role}|{c.group}|{c.name}|{c.value}|{int(c.enabled)}")
         parts.extend(sorted(self.validation_messages))
         return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:32]
 
@@ -230,6 +251,28 @@ _CONTROLS_JS = """
     return (el.getAttribute('placeholder') || el.innerText || el.value || el.name || '').trim();
   }
 
+  function groupLabel(el) {
+    // The question a radio/checkbox belongs to usually lives on the
+    // enclosing fieldset legend or ARIA group, never on the option itself.
+    const fs = el.closest('fieldset');
+    if (fs) {
+      const legend = fs.querySelector('legend');
+      if (legend && legend.innerText.trim()) return legend.innerText.trim();
+    }
+    const grp = el.closest('[role=group],[role=radiogroup]');
+    if (grp) {
+      const aria = grp.getAttribute('aria-label');
+      if (aria) return aria.trim();
+      const labelledby = grp.getAttribute('aria-labelledby');
+      if (labelledby) {
+        const t = labelledby.split(/\\s+/)
+          .map(id => document.getElementById(id)?.innerText || '').join(' ').trim();
+        if (t) return t;
+      }
+    }
+    return '';
+  }
+
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -279,6 +322,7 @@ _CONTROLS_JS = """
       ref: String(ref),
       role,
       name: (accessibleName(el) || '').slice(0, 160),
+      group: (groupLabel(el) || '').slice(0, 200),
       value,
       enabled: !el.disabled,
       required: !!(el.required || el.getAttribute('aria-required') === 'true'),
@@ -374,6 +418,7 @@ def observe(
             ref=str(c.get("ref", "")),
             role=c.get("role", ""),
             name=c.get("name", ""),
+            group=c.get("group", "") or "",
             value=c.get("value", "") or "",
             enabled=bool(c.get("enabled", True)),
             required=bool(c.get("required", False)),

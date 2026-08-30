@@ -162,6 +162,39 @@ volume, and benchmark scores do not measure this.
   detects both repeated no-op actions and A→B→A cycles, terminating the
   recovery path instead of retrying. Budgets are hard bounds, not advice.
 
+## 13. Group-labelled controls defeat name-based field policy
+
+- **Reproduced:** in this repo, by
+  `test_agent_controller.py::test_sensitive_field_request_escalates_to_human`
+  during the Phase 3–5 slice. The agent asked to tick a radio on the work-
+  authorization question and **policy allowed it**.
+- **Root cause:** the sensitive-field guardrail matched against the
+  control's own accessible name. A radio inside
+  `<fieldset><legend>Are you legally authorized to work in the United
+  States?</legend> … <label><input type="radio"> Yes</label>` has the
+  accessible name **"Yes"**. The question exists only on the enclosing
+  group, so the guardrail saw nothing sensitive.
+- **Why it matters more than it looks:** work authorization, visa
+  sponsorship, veteran status, disability and EEOC questions are *almost
+  always* rendered as grouped radios. A guardrail that only reads the option
+  label misses essentially the entire sensitive category — while appearing
+  to work, because it still catches sensitive *text inputs*. This is a
+  WRONG_SENSITIVE_ANSWER_RATE defect (spec §93), the highest-severity class
+  after duplicate/false submission.
+- **Lesson:** for any policy decision about *what a field is asking*, the
+  unit of meaning is the control **plus its group context**, never the
+  control alone. Accessible name answers "what is this widget"; the group
+  answers "what is the question".
+- **Our response:** `Control.group` is captured from the fieldset legend /
+  ARIA group label, `Control.semantic_label` combines them, and
+  `policy._field_name_for` matches on the semantic label. The group is also
+  folded into the state digest, so a conditional section swapping in a
+  different question registers as a state change even when the visible
+  option labels ("Yes"/"No") are identical. Regression tests:
+  `test_sensitive_radio_option_is_caught_via_its_group_legend`,
+  `test_credential_rule_also_sees_group_context`, and
+  `test_benign_radio_group_is_still_allowed` (guards against over-blocking).
+
 ---
 
 ## Template for new entries
