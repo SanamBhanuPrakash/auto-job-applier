@@ -142,10 +142,11 @@ LADDERS: dict[RecoveryTrigger, tuple[RecoveryAction, ...]] = {
         RecoveryAction.ESCALATE_HUMAN,
     ),
     RecoveryTrigger.SESSION_EXPIRED: (
-        # REAUTHENTICATE has no implementation yet (Phases 11-14); until
-        # then the engine reports it unavailable and the ladder falls to a
-        # human rather than improvising a login.
-        RecoveryAction.REAUTHENTICATE, RecoveryAction.ESCALATE_HUMAN,
+        # One attempt, then a human. Never two: a stored credential that is
+        # wrong stays wrong, and a second try is how an account gets locked
+        # (see jobbot/auth/session.py).
+        RecoveryAction.REAUTHENTICATE, RecoveryAction.REOBSERVE,
+        RecoveryAction.ESCALATE_HUMAN,
     ),
     RecoveryTrigger.NETWORK_ERROR: (
         RecoveryAction.REFRESH, RecoveryAction.RELOAD, RecoveryAction.RETRY,
@@ -307,12 +308,7 @@ class RecoveryEngine:
             return RecoveryStep(action, executed=False, retry_operation=True,
                                 reason=f"caller should {action.value.lower()} and retry")
         if action is RecoveryAction.REAUTHENTICATE:
-            # Honest unavailability beats a guessed login flow (§25 is a
-            # later phase). Falls through to a human.
-            return RecoveryStep(
-                RecoveryAction.ESCALATE_HUMAN, executed=False, escalate=True,
-                reason="re-authentication is not implemented yet; a person must sign in",
-            )
+            return self._reauthenticate(ctx)
 
         return self._execute_browser_action(
             action, ctx, application_url=application_url, frame_hint=frame_hint,
@@ -384,6 +380,40 @@ class RecoveryEngine:
             )
 
         return RecoveryStep(action, executed=False, reason=f"no handler for {action.value}")
+
+    def _reauthenticate(self, ctx: ToolContext) -> RecoveryStep:
+        """Hand the page to the auth subsystem (spec §25).
+
+        The engine never sees a credential: it calls `ensure_authenticated`
+        and gets back a status. Whatever happens, the reason recorded here
+        is already redacted by `AuthResult.to_dict`.
+        """
+        from jobbot.auth.orchestrator import AuthOrchestrator
+        from jobbot.auth.session import record_attempt, should_attempt
+
+        url = ""
+        try:
+            url = ctx.page.url or ""
+        except Exception:  # noqa: BLE001
+            pass
+
+        allowed, why = should_attempt(url)
+        if not allowed:
+            return RecoveryStep(
+                RecoveryAction.ESCALATE_HUMAN, executed=False, escalate=True, reason=why,
+            )
+
+        result = AuthOrchestrator().ensure_authenticated(ctx.page, url=url)
+        record_attempt(url, result)
+        if result.ok:
+            return RecoveryStep(
+                RecoveryAction.REAUTHENTICATE, executed=True, retry_operation=True,
+                reason=result.reason, evidence=result.evidence,
+            )
+        return RecoveryStep(
+            RecoveryAction.ESCALATE_HUMAN, executed=False, escalate=True,
+            reason=result.reason, evidence=result.evidence,
+        )
 
     def _reground(self, ctx: ToolContext) -> RecoveryStep:
         """Re-resolve element identity after a re-render (failures §4).

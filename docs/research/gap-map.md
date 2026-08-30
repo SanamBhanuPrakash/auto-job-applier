@@ -1,8 +1,8 @@
 # Gap map: spec capability → current tree
 
-Updated as slices land. Current tree: Phases 1-10 complete, 455 tests passing
-(1 skipped), plus a 48-scenario fault-injection suite (37 pass / 11 skip for
-unbuilt capabilities). Last assessed after the Phase 8-10 slice.
+Updated as slices land. Current tree: Phases 1-14 complete, 522 tests passing
+(1 skipped), plus a 48-scenario fault-injection suite (45 pass / 3 skip for
+unbuilt capabilities). Last assessed after the Phase 11-14 slice.
 
 Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred)
 
@@ -56,11 +56,21 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | LLM decider + timeouts/routing | **GAP** (§23, §110, §111) |
 | Recovery engine driven from the deterministic path | **PARTIAL** — engine + ladders exist and are tested; `submit/base.py` currently uses takeover only, not the full ladder |
 
-## Authentication — GAP (deliberately later)
+## Authentication — DONE (Phases 11–14)
 
-Login / signup / SSO / OTP / session expiry / credential isolation /
-`AccountRecord` persistence: all **GAP**. Depends on perception + tool layer
-existing first; building it before those would mean rewriting it.
+| Capability | Status | Where |
+|---|---|---|
+| Auth state detection (12 states) | DONE | `auth/detect.py`, signal-based, no LLM |
+| Credential isolation (§26) | DONE | `auth/credentials.py` — keyring/env, `Secret`, `redact` |
+| Login incl. multi-step | DONE | `auth/orchestrator.py`, verified not inferred |
+| Session reuse + expiry | DONE | `auth/session.py` + `AccountRecord` |
+| `AccountRecord` persistence | DONE | no secret-bearing column, asserted by test |
+| Auth failure circuit breaker | DONE | 2 strikes, then a human |
+| `REAUTHENTICATE` recovery action | DONE | was the one action reporting itself unavailable |
+| OTP / email verification | DONE as hand-over | codes are never guessed or harvested |
+| SSO | REFUSED by design | driving a primary identity is out of scope |
+| CAPTCHA / bot detection / locked | REFUSED by design | boundaries, not obstacles |
+| Automated signup | **GAP** (deliberate) | gated off; detection + refusal implemented |
 
 ## Discovery — PARTIAL
 
@@ -119,15 +129,15 @@ defect (failures §17).
 5. ~~**Fault-injection evaluation harness**~~ — DONE (Phase 9). Found a
    false-submission defect on its first run (failures §17).
 6. ~~**Browser identity/profile isolation**~~ — DONE (Phase 10).
-7. **Auth orchestrator** (Phases 11–14) ← *next*, and now clearly the
-   binding constraint: eleven of the 48 eval scenarios skip for want of it,
-   `REAUTHENTICATE` is the one recovery action that reports itself
-   unavailable, and most real applications behind an account wall stop at a
-   human. See docs/PRODUCTION_READINESS.md for why this blocks Level 2.
-8. Per-step trace persistence — the other Level-2 blocker (§96 "traces are
-   complete"). Small, and it makes a pilot auditable after the fact.
-9. Multi-page application flow control.
-10. Structured `JobRequirements`; location normalization; search discovery.
+7. ~~**Auth orchestrator**~~ — DONE (Phases 11–14). Eight eval scenarios
+   moved from SKIP to PASS. Found failures §19 on the way.
+8. **Per-step trace persistence** ← *next*. The remaining Level-2 blocker
+   under §96 ("traces are complete"): `StepRecord` exists in memory but is
+   never written, so a pilot cannot be audited after the fact. Small.
+9. **A real end-to-end run** against a live posting — the other Level-2
+   blocker, and the one no amount of local work substitutes for.
+10. Multi-page application flow control (one of the two remaining eval skips).
+11. Structured `JobRequirements`; location normalization; search discovery.
 
 Playwright MCP (spec §62/§121) is unblocked and now has somewhere to
 plug in: `ToolResult`, the registry, and a `Decider` protocol all exist,

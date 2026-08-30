@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     jobbot_agent_takeover: bool = True
     # Hard bound on one takeover episode.
     jobbot_agent_max_steps: int = 12
+    # Sign in to sites that require it, using a credential from your OS
+    # keyring (or JOBBOT_CRED_<DOMAIN>_USER / _PASSWORD). The password
+    # never reaches the LLM, a prompt, a tool argument or a trace — see
+    # jobbot/auth/. CAPTCHA, third-party SSO and one-time codes are never
+    # automated; those hand over to you.
+    jobbot_auth_enabled: bool = True
+    # Creating accounts unattended is off by default (spec §29), and even
+    # when on is limited to domains named here (comma-separated).
+    jobbot_allow_signup: bool = False
+    jobbot_signup_domains: str = ""
 
     @property
     def data_dir(self) -> Path:

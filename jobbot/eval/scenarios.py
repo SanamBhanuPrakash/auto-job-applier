@@ -24,6 +24,8 @@ class Expect(str, Enum):
     """What a correct system does in this scenario."""
 
     REACHES_FORM = "REACHES_FORM"            # ends with an application form in hand
+    AUTHENTICATES = "AUTHENTICATES"          # signs in, verified against the page
+    ALREADY_AUTHENTICATED = "ALREADY_AUTHENTICATED"
     SUBMITS = "SUBMITS"                      # verified submission
     ESCALATES_HUMAN = "ESCALATES_HUMAN"      # parks for a person
     BLOCKED = "BLOCKED"                      # a wall; never worked around
@@ -57,7 +59,6 @@ class Scenario:
 
 #: Capabilities that do not exist yet. Named here so the skip reason in a
 #: report says what is missing rather than "unsupported".
-AUTH = "AuthOrchestrator (spec §25, phases 11-14) is not built"
 MULTIPAGE = "multi-page application flow control is not built"
 PROCESS = "process-level crash/restart harness is not built"
 
@@ -66,16 +67,22 @@ SCENARIOS: tuple[Scenario, ...] = (
     # -- 1-8: entry paths -------------------------------------------------
     Scenario("guest_application", "entry", Expect.REACHES_FORM,
              fixture="application_form.html"),
-    Scenario("login_required", "auth", Expect.ESCALATES_HUMAN,
-             fixture="login_page.html", requires=AUTH),
-    Scenario("signup_required", "auth", Expect.ESCALATES_HUMAN, requires=AUTH),
-    Scenario("existing_account", "auth", Expect.ESCALATES_HUMAN, requires=AUTH),
-    Scenario("expired_session", "auth", Expect.ESCALATES_HUMAN,
-             fixture="login_page.html", requires=AUTH),
-    Scenario("sso", "auth", Expect.ESCALATES_HUMAN, requires=AUTH),
-    Scenario("otp", "auth", Expect.ESCALATES_HUMAN,
-             fixture="otp_page.html", requires=AUTH),
-    Scenario("email_verification", "auth", Expect.ESCALATES_HUMAN, requires=AUTH),
+    Scenario("login_required", "auth", Expect.AUTHENTICATES,
+             fixture="login_page.html",
+             notes="a stored credential is used; the password never reaches a prompt"),
+    Scenario("signup_required", "auth", Expect.ESCALATES_HUMAN,
+             fixture="signup_page.html",
+             notes="account creation is off by default (§29)"),
+    Scenario("existing_account", "auth", Expect.ALREADY_AUTHENTICATED,
+             fixture="signed_in_page.html"),
+    Scenario("expired_session", "auth", Expect.AUTHENTICATES,
+             fixture="session_expired_page.html"),
+    Scenario("sso", "auth", Expect.REFUSES_ACTION, fixture="sso_page.html",
+             notes="third-party SSO risks the candidate's primary identity"),
+    Scenario("otp", "auth", Expect.ESCALATES_HUMAN, fixture="otp_page.html",
+             notes="unattended runs have nobody to ask; codes are never guessed"),
+    Scenario("email_verification", "auth", Expect.ESCALATES_HUMAN,
+             fixture="email_verification_page.html"),
 
     # -- 9-15: form shapes -------------------------------------------------
     Scenario("multi_page_form", "form", Expect.REACHES_FORM, requires=MULTIPAGE),
@@ -158,7 +165,9 @@ SCENARIOS: tuple[Scenario, ...] = (
     # -- 43-48: interruption, takeover, resume ------------------------------
     Scenario("popup_interruption", "drift", Expect.NO_SUBMISSION,
              fixture="application_form.html", fault="open_popup"),
-    Scenario("session_expiry_mid_form", "auth", Expect.ESCALATES_HUMAN, requires=AUTH),
+    Scenario("session_expiry_mid_form", "auth", Expect.RECOVERS,
+             fixture="session_expired_page.html",
+             notes="the SESSION_EXPIRED ladder reaches REAUTHENTICATE"),
     Scenario("agent_takeover", "agent", Expect.REACHES_FORM,
              fixture="apply_entry_page.html"),
     Scenario("successful_hand_back", "agent", Expect.REACHES_FORM,

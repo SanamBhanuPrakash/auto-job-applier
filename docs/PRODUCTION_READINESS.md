@@ -39,7 +39,7 @@ Levels are never entered automatically. Each needs the evidence below.
 |---|---|---|
 | Complete unit suite passes | PASS | `pytest -q` |
 | Browser fixture suite passes | PASS | real Chromium, ~20 fixture pages |
-| Fault-injection suite passes | PASS | `jobbot eval` — 37 pass, 0 fail, 11 skip |
+| Fault-injection suite passes | PASS | `jobbot eval` — 45 pass, 0 fail, 3 skip |
 | Recovery suite passes | PASS | `tests/test_agent_recovery.py` |
 | Checkpoint/restart suite passes | PARTIAL | state-machine level only; no process-crash harness |
 | Duplicate race suite passes | PASS | verified with three real OS processes |
@@ -47,12 +47,14 @@ Levels are never entered automatically. Each needs the evidence below.
 | Credential leakage tests pass | PASS | credential fields refused at the tool boundary |
 | Sensitive-field tests pass | PASS | failures §13 and §15 regressions |
 | Submission verification suite passes | PASS | including failures §17 |
-| Auth suite passes | **FAIL** | there is no auth subsystem to test |
+| Auth suite passes | PASS | `tests/test_auth_*.py`, 66 tests; 9 eval auth scenarios |
 | Integration suite passes | **FAIL** | no end-to-end run against a real posting |
 | Traces are complete | **FAIL** | per-step traces are in memory, not persisted |
 | No known Critical defect remains | PASS | none open; four found and fixed this cycle |
 
-Three gates fail. That is why this is Level 1.
+Two gates fail. That is why this is still Level 1 — and note which two:
+both are about *evidence from the real world*, not about missing code. No
+amount of further local building moves them.
 
 ## Critical metrics (§93)
 
@@ -74,6 +76,8 @@ has happened — see LIMITATIONS.md.
 
 1. A real end-to-end run against a live posting, start to finish, with the
    submission verified by looking at the employer's confirmation email.
+   **This is the binding constraint.** Everything else on this list is
+   code; this one is evidence, and there is no substitute for it.
 2. Per-step traces persisted to the database, so a pilot can be audited
    after the fact rather than from log scrollback.
 3. Twenty-plus real applications with a human reviewing every one, and the
@@ -84,10 +88,14 @@ has happened — see LIMITATIONS.md.
 
 ## What Level 3 (production) would additionally require
 
-5. The auth subsystem (§25), because most real applications behind a login
-   currently stop at a human.
-6. Multi-page application flow control.
-7. A pilot period with no Critical defect found.
+5. Multi-page application flow control.
+6. A pilot period with no Critical defect found.
+
+The auth subsystem (§25) is **done** — login, session reuse, expiry
+detection, credential isolation and an auth-failure circuit breaker. What
+it deliberately refuses (third-party SSO, one-time codes, CAPTCHA, account
+creation) still stops for a human, so unattended operation on sites using
+those is out of scope by design rather than by omission.
 
 ## What Level 4 (high-scale) would additionally require
 

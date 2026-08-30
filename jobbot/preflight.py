@@ -169,10 +169,64 @@ def _check_agent() -> Check:
                  "(the agent can never fill or submit)")
 
 
+def _check_auth() -> Check:
+    """Sign-in capability, and where credentials would come from."""
+    from jobbot.auth.credentials import _keyring
+    from jobbot.auth.session import MAX_CONSECUTIVE_FAILURES, list_records
+    from jobbot.config import get_settings
+
+    settings = get_settings()
+    if not settings.jobbot_auth_enabled:
+        return Check("sign-in", Status.WARN,
+                     "off — postings behind a login will stop for you",
+                     "set JOBBOT_AUTH_ENABLED=true")
+
+    keyring_available = _keyring() is not None
+    try:
+        records = list_records()
+    except Exception:  # noqa: BLE001
+        records = []
+    stuck = [r for r in records if (r.consecutive_failures or 0) >= MAX_CONSECUTIVE_FAILURES]
+
+    if stuck:
+        return Check(
+            "sign-in", Status.WARN,
+            f"{len(stuck)} domain(s) not being retried after repeated failures: "
+            + ", ".join(r.domain for r in stuck[:4]),
+            "fix the credential with `jobbot auth add <domain>`, or sign in yourself once",
+        )
+    detail = (f"on; credentials from the OS keyring"
+              if keyring_available else
+              "on; no OS keyring, so credentials must come from "
+              "JOBBOT_CRED_<DOMAIN>_USER / _PASSWORD")
+    if records:
+        detail += f"; {len(records)} domain(s) seen"
+    return Check("sign-in", Status.OK, detail,
+                 "" if keyring_available else "pip install keyring for encrypted storage")
+
+
+def _check_signup() -> Check:
+    """Account creation is the setting with the widest blast radius."""
+    from jobbot.config import get_settings
+
+    settings = get_settings()
+    if not settings.jobbot_allow_signup:
+        return Check("account creation", Status.OK,
+                     "off — postings needing a new account stop for you")
+    domains = [d.strip() for d in (settings.jobbot_signup_domains or "").split(",") if d.strip()]
+    if not domains:
+        return Check("account creation", Status.WARN,
+                     "enabled but no allowed domains listed, so nothing can use it",
+                     "set JOBBOT_SIGNUP_DOMAINS, or JOBBOT_ALLOW_SIGNUP=false")
+    return Check("account creation", Status.WARN,
+                 f"enabled for: {', '.join(domains)}",
+                 "set JOBBOT_ALLOW_SIGNUP=false unless you meant this")
+
+
 CHECKS = (
     _check_profile, _check_resume, _check_resume_folder, _check_llm,
     _check_browser, _check_database, _check_submission_mode,
-    _check_sensitive_autofill, _check_agent,
+    _check_sensitive_autofill, _check_agent, _check_auth, _check_signup,
 )
 
 

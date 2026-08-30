@@ -29,16 +29,38 @@ Discovery from public ATS endpoints (Greenhouse, Lever, Ashby, Workable,
 SmartRecruiters, RemoteOK and similar) is a different matter and is
 implemented — those are public JSON APIs meant to be read.
 
-## Authentication
+## Authentication — what it does and does not do
 
-There is no auth subsystem. Login, signup, SSO, OTP and email verification
-all stop and ask a human. `REAUTHENTICATE` is the one recovery action that
-reports itself unavailable rather than improvising, which is deliberate: a
-guessed login flow is how credentials end up in a trace.
+There **is** an auth subsystem now (`jobbot/auth/`). It signs in with a
+credential from your OS keyring, and it verifies the result against the
+page rather than assuming a click worked.
 
-Practically: postings behind an account wall need you to sign in once in
-the browser window. The profile directory persists, so the session
-survives between runs.
+What it will not do, by design:
+
+- **Third-party SSO** ("Continue with Google/Microsoft/Apple"). Driving
+  that means using your primary identity, where the blast radius of a
+  mistake is your whole account rather than one job application. Sign in
+  yourself once; the session is reused.
+- **One-time codes.** An unattended run has nobody to ask, and there is no
+  legitimate way to obtain one otherwise — this does not read your email
+  to harvest OTPs. Attended runs can prompt you for the code.
+- **CAPTCHA, bot detection, security challenges, locked accounts.**
+  Boundaries, not obstacles.
+- **Creating accounts.** Off by default, and even when enabled it is
+  limited to domains you name, and the flow itself is not implemented.
+- **Retrying a password.** One attempt. A stored credential that is wrong
+  stays wrong, and a second try is how "wrong password" becomes "account
+  locked". After two consecutive failures on a domain, that domain is not
+  attempted again until you intervene.
+
+Your password never reaches the LLM, a prompt, a tool argument, or a trace
+row — `agent/policy.py` refuses credential-shaped fields through the
+generic tools, so the auth subsystem is the only path. If no OS keyring is
+available, storing a credential **refuses** rather than falling back to a
+file.
+
+Not verified against a real login. Like everything else here, the auth
+flows are tested against local fixture pages.
 
 ## Multi-page applications
 
@@ -88,7 +110,8 @@ treat as spam; the pacing defaults are deliberately conservative.
 ## What the fault-injection numbers cover
 
 `jobbot eval` reports 0.00% on all three critical metrics. That is
-measured over 37 scenarios against fixture pages. Eleven of the 48
+measured over 45 scenarios against fixture pages. Three of the 48
 scenarios the spec names are **skipped**, by name, because the capability
-does not exist yet — they are not passes. Skips are listed in the report
-output every time it runs.
+does not exist yet (multi-page flows, process-level crash injection, and
+one helper) — they are not passes. Skips are listed in the report output
+every time it runs.

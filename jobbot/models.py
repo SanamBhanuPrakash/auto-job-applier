@@ -214,3 +214,44 @@ class FieldIssue(Base):
     failure_count: Mapped[int] = mapped_column(default=0)
     last_error: Mapped[str] = mapped_column(Text, default="")
     last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class AccountRecord(Base):
+    """What we know about our session on one domain (spec §25, §27).
+
+    Deliberately contains **no credential material** — no password, no
+    cookie, no token. Cookies live in the Chromium profile directory on
+    disk, where the browser manages them; this table only records that a
+    session existed, when it was last seen working, and how the last
+    authentication attempt ended, so a run can decide whether to bother
+    trying before it opens a page.
+
+    Keeping secrets out of the database is not incidental. This file is
+    read by report commands, dumped in bug reports, and synced by whatever
+    backs up the data directory.
+    """
+
+    __tablename__ = "account_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    domain: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    #: The identifier used to sign in. Not secret, and needed to tell two
+    #: accounts on one domain apart.
+    username: Mapped[str] = mapped_column(String(256), default="")
+    #: Chromium profile directory holding this session's cookies.
+    profile_dir: Mapped[str] = mapped_column(String(1024), default="")
+    #: Last AuthOutcome, as a plain string.
+    last_outcome: Mapped[str] = mapped_column(String(64), default="")
+    last_auth_state: Mapped[str] = mapped_column(String(64), default="")
+    #: When we last saw positive evidence of being signed in.
+    last_verified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    #: Consecutive failures. A domain that keeps failing is not retried
+    #: automatically — repeated attempts are how accounts get locked.
+    consecutive_failures: Mapped[int] = mapped_column(default=0)
+    #: Redacted, human-readable note about the last attempt.
+    note: Mapped[str] = mapped_column(Text, default="")

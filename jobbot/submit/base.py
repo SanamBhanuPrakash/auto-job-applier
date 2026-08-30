@@ -184,6 +184,25 @@ def apply_to_job(
                       category=FailureCategory.BLOCKED, run_id=run_id)
                 return _reload(app_id)
 
+            # --- authentication (§25) -----------------------------------
+            # Plenty of postings put the form behind a sign-in. The auth
+            # subsystem reads the credential, types it, and *verifies*; a
+            # password never passes through the agent, a prompt or a trace.
+            # Anything it will not do — CAPTCHA, SSO, a second factor with
+            # nobody to ask — parks for a person rather than improvising.
+            auth = _ensure_authenticated(page, job.url, app_id=app_id, run_id=run_id)
+            if auth is not None and not auth.ok:
+                _park(
+                    app_id,
+                    ApplicationState.BLOCKED if auth.outcome.value == "BLOCKED"
+                    else ApplicationState.HUMAN_REVIEW,
+                    reason=f"authentication: {auth.reason}"[:500],
+                    category=(FailureCategory.BLOCKED if auth.outcome.value == "BLOCKED"
+                              else FailureCategory.RECOVERABLE),
+                    run_id=run_id, detail=auth.to_dict(),
+                )
+                return _reload(app_id)
+
             # A form may genuinely not be here yet: many postings put it
             # behind an "Apply" button, and some employers render it in an
             # iframe that hydrates late. A timeout is a signal to look
@@ -462,6 +481,54 @@ def apply_to_job(
                 context.close()
             except Exception:  # noqa: BLE001
                 log.debug("context.close() failed (already closed) — ignoring", exc_info=True)
+
+
+def _ensure_authenticated(page, url: str, *, app_id: int, run_id: str):
+    """Run the auth subsystem against the current page.
+
+    Returns None when authentication is switched off, so the caller
+    behaves exactly as it did before this existed.
+    """
+    settings = get_settings()
+    if not settings.jobbot_auth_enabled:
+        return None
+
+    from jobbot.auth.orchestrator import AuthOrchestrator, VerificationChannel
+    from jobbot.auth.session import record_attempt, should_attempt
+
+    allowed, why = should_attempt(url)
+    if not allowed:
+        from jobbot.auth.states import AuthOutcome, AuthState
+        from jobbot.auth.orchestrator import AuthResult
+        return AuthResult(AuthOutcome.HUMAN_REQUIRED, AuthState.LOGIN_REQUIRED,
+                          reason=why, resumable_by_human=True)
+
+    orchestrator = AuthOrchestrator(
+        # An unattended run has nobody to ask for a one-time code, and
+        # there is no legitimate way to obtain one otherwise. Attended
+        # runs pass a prompt in through the CLI.
+        verification=VerificationChannel(prompt=_OTP_PROMPT),
+        allow_signup=settings.jobbot_allow_signup,
+        allowed_signup_domains=tuple(
+            d.strip() for d in (settings.jobbot_signup_domains or "").split(",") if d.strip()
+        ),
+    )
+    result = orchestrator.ensure_authenticated(page, url=url)
+    record_attempt(url, result, profile_dir=str(_user_data_dir()))
+    log.info("Application %d: authentication %s (%s)", app_id, result.outcome.value,
+             result.reason[:120])
+    return result
+
+
+#: Set by the CLI for attended runs. Left None otherwise, which makes the
+#: verification channel report UNAVAILABLE rather than inventing a code.
+_OTP_PROMPT = None
+
+
+def set_otp_prompt(prompt) -> None:
+    """Install a callable that asks the human for a one-time code."""
+    global _OTP_PROMPT
+    _OTP_PROMPT = prompt
 
 
 def _auto_submit(page, form_ctx, ats_module, job: Job, app_id: int, *, run_id: str) -> str | None:

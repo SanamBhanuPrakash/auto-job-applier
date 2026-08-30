@@ -356,6 +356,42 @@ because a live form with no submit control is not a coherent page.
   "we never looked" is not that. This is failures §14 applied to
   measurement rather than to recovery.
 
+## 19. "Nothing is asking me to sign in" is not "I am signed in"
+
+- **Reproduced:** twice while building the auth subsystem, from two
+  different directions.
+  1. `AuthOrchestrator.ensure_authenticated(None)` returned
+     `ALREADY_AUTHENTICATED`. Perception failed, so no login form was
+     seen, so nothing appeared to be asking — and the absence of a
+     question was read as an answer.
+  2. `AuthState.NOT_AUTH` was mapped to outcome `ALREADY_AUTHENTICATED`,
+     which `record_attempt` then wrote down as a **verified session** —
+     making `session_is_fresh` claim a live session for the next twelve
+     hours on the strength of a page that merely did not contain a login
+     form. An error page, a 404 and a half-loaded page all fail to ask.
+- **Why this one is worse than the earlier instances:** the other
+  absence-as-evidence bugs (§14, §17b) caused a wasted retry or a wrong
+  verdict on one application. This one causes the system to carry on
+  believing it is authenticated when it is not, which means every
+  subsequent action on that domain is taken in the wrong state.
+- **Lesson:** the fourth appearance of one pattern in this repo, so the
+  rule is worth stating as a rule rather than as four anecdotes:
+  **a predicate over observations must distinguish "I observed the absence
+  of X" from "I failed to observe".** Any function that returns a
+  conclusion from an observation needs an explicit branch for
+  `observation.degraded`, and any negative conclusion needs to name what
+  positive evidence would have looked like.
+- **Our response:** `AuthOutcome` gained `NOT_REQUIRED` (the page did not
+  ask — proceed, but this is not a session) and `INDETERMINATE`
+  (perception failed — conclude nothing). `AuthResult.ok` and
+  `AuthResult.verified_session` are deliberately different properties, and
+  only the second may update `last_verified_at`. `ensure_authenticated`
+  returns `INDETERMINATE` immediately on a degraded observation, before
+  any detection runs. Regressions:
+  `test_a_page_that_never_asked_is_not_a_verified_session`,
+  `test_an_unreadable_page_yields_indeterminate_not_success`,
+  `test_a_page_that_never_asked_is_not_recorded_as_verified`.
+
 ---
 
 ## Template for new entries

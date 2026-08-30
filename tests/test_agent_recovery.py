@@ -158,13 +158,29 @@ def test_caller_level_actions_are_reported_not_faked():
     assert takeover.executed is False and takeover.takeover is True
 
 
-def test_reauthenticate_reports_unavailable_rather_than_improvising():
+def test_reauthenticate_never_improvises_a_login():
+    """This originally asserted that REAUTHENTICATE reported itself
+    unimplemented. It is implemented now (jobbot/auth), so the guarantee
+    it was protecting — never improvise a login — is asserted directly
+    instead: an unreadable page must not produce "authenticated".
+    """
     engine = RecoveryEngine()
     ctx = ToolContext(page=None, application_state=S.FILLING)
     step = engine.execute(RecoveryAction.REAUTHENTICATE, ctx)
     assert step.action is RecoveryAction.ESCALATE_HUMAN
     assert step.escalate is True
-    assert "not implemented" in step.reason
+    assert step.retry_operation is False
+
+
+def test_reauthentication_stops_after_repeated_failures():
+    """A stored credential that is wrong stays wrong. A second attempt does
+    not make it right, and a third is how the account gets locked."""
+    from jobbot.auth import session as authsess
+
+    assert authsess.MAX_CONSECUTIVE_FAILURES <= 2
+    ladder = LADDERS[RecoveryTrigger.SESSION_EXPIRED]
+    assert ladder.count(RecoveryAction.REAUTHENTICATE) == 1
+    assert ladder[-1] is RecoveryAction.ESCALATE_HUMAN
 
 
 def test_reopen_without_a_url_escalates_instead_of_navigating_somewhere():

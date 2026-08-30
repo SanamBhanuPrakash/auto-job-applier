@@ -206,6 +206,21 @@ and waits for you to type `yes`. Auto-submit exists and is off.
 veteran status, disability, race/ethnicity and legal attestations are never
 answered by the model — see "Guardrails" below.
 
+**Sites that need a login.** Store the credential once and jobbot signs in
+for you:
+
+```bash
+jobbot auth add myworkdayjobs.com     # password read without echo, into your OS keyring
+jobbot auth check <posting-url>       # what does this posting actually require?
+jobbot auth list                      # which sites, and how sign-in last went
+```
+
+The password goes to your OS keyring and never reaches the LLM, a prompt,
+a tool argument or a log line. What it will *not* do: third-party SSO
+("Continue with Google"), one-time codes, CAPTCHA, or creating accounts —
+those hand back to you, on purpose. And it never retries a password: two
+failures on a domain and it stops rather than risking a lockout.
+
 To see what the safety machinery actually does, under injected faults:
 
 ```bash

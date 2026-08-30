@@ -692,5 +692,114 @@ def run_eval(
         raise typer.Exit(code=1)
 
 
+auth_app = typer.Typer(help="Sign-in credentials for sites that require an account.")
+app.add_typer(auth_app, name="auth")
+
+
+@auth_app.command("add")
+def auth_add(
+    domain: str = typer.Argument(..., help="Site domain, e.g. myworkdayjobs.com"),
+    username: str = typer.Option(..., prompt="Username or email"),
+) -> None:
+    """Store a credential in your OS keyring.
+
+    The password is read without echo, written to the keyring, and never
+    written to this repo, a log, a prompt or a trace. If no keyring is
+    available this refuses rather than falling back to a file.
+    """
+    from jobbot.auth.credentials import CredentialStore, normalize_domain
+
+    password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
+    try:
+        source = CredentialStore().store(domain, username, password)
+    except RuntimeError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+    finally:
+        del password
+    console.print(f"[green]Stored[/green] credential for "
+                  f"{normalize_domain(domain)} in the {source.value.lower()}.")
+
+
+@auth_app.command("list")
+def auth_list() -> None:
+    """Show which domains have a credential and how sign-in last went.
+
+    Never prints a password — there is no code path here that reads one.
+    """
+    from jobbot.auth.credentials import CredentialStore
+    from jobbot.auth.session import list_records
+
+    records = list_records()
+    store = CredentialStore()
+
+    table = Table(title="Sites requiring sign-in")
+    table.add_column("domain")
+    table.add_column("credential")
+    table.add_column("last outcome")
+    table.add_column("last verified")
+    table.add_column("fails")
+    for r in records:
+        table.add_row(
+            r.domain, store.source_for(r.domain).value.lower(),
+            r.last_outcome or "-",
+            str(r.last_verified_at or "never"),
+            str(r.consecutive_failures),
+        )
+    if not records:
+        console.print("No sign-in attempts recorded yet.")
+        return
+    console.print(table)
+    stuck = [r for r in records if r.consecutive_failures >= 2]
+    for r in stuck:
+        console.print(f"[yellow]{r.domain}[/yellow] is not being retried: {r.note[:140]}")
+
+
+@auth_app.command("forget")
+def auth_forget(domain: str) -> None:
+    """Remove a stored credential."""
+    from jobbot.auth.credentials import CredentialStore, normalize_domain
+
+    ok = CredentialStore().forget(domain)
+    console.print(f"{'Removed' if ok else 'Nothing stored for'} "
+                  f"{normalize_domain(domain)}.")
+
+
+@auth_app.command("check")
+def auth_check(url: str) -> None:
+    """Open a URL and report what it is asking for, without signing in.
+
+    Useful for finding out whether a posting needs an account before
+    spending a run on it.
+    """
+    from playwright.sync_api import sync_playwright
+
+    from jobbot.agent.observation import Detail, observe
+    from jobbot.auth.credentials import CredentialStore
+    from jobbot.auth.detect import detect_auth_state
+    from jobbot.submit.base import _user_data_dir
+
+    settings = get_settings()
+    with sync_playwright() as pw:
+        context = pw.chromium.launch_persistent_context(
+            str(_user_data_dir()), headless=settings.jobbot_headless
+        )
+        try:
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            observation = observe(page, None, detail=Detail.ARIA)
+            state, evidence = detect_auth_state(observation)
+        finally:
+            context.close()
+
+    console.print(f"[bold]{state.value}[/bold]")
+    for line in evidence:
+        console.print(f"  • {line}")
+    if state.value in ("LOGIN_REQUIRED", "SESSION_EXPIRED"):
+        have = CredentialStore().has(url)
+        console.print(f"  credential stored: {'yes' if have else 'no'}"
+                      + ("" if have else " — `jobbot auth add <domain>`"))
+
+
 if __name__ == "__main__":
     app()
