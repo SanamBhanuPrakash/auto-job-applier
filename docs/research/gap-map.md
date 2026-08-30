@@ -1,8 +1,8 @@
 # Gap map: spec capability → current tree
 
-Updated as slices land. Current tree: Phases 1-14 complete, 522 tests passing
+Updated as slices land. Current tree: Phases 1-14 complete, 545 tests passing
 (1 skipped), plus a 48-scenario fault-injection suite (45 pass / 3 skip for
-unbuilt capabilities). Last assessed after the Phase 11-14 slice.
+unbuilt capabilities). Last assessed after the onboarding slice.
 
 Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred)
 
@@ -131,7 +131,12 @@ defect (failures §17).
 6. ~~**Browser identity/profile isolation**~~ — DONE (Phase 10).
 7. ~~**Auth orchestrator**~~ — DONE (Phases 11–14). Eight eval scenarios
    moved from SKIP to PASS. Found failures §19 on the way.
-8. **Per-step trace persistence** ← *next*. The remaining Level-2 blocker
+8. ~~**Unattended operation**~~ — DONE. `jobbot setup` collects the
+   sensitive answers from the candidate up front, so the guardrail has
+   nothing left to block. The rule is unchanged: model-produced values are
+   still refused for those fields (`submit/memory_plan.py`, extracted from
+   base.py precisely so that decision is directly testable).
+9. **Per-step trace persistence** ← *next*. The remaining Level-2 blocker
    under §96 ("traces are complete"): `StepRecord` exists in memory but is
    never written, so a pilot cannot be audited after the fact. Small.
 9. **A real end-to-end run** against a live posting — the other Level-2

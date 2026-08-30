@@ -184,10 +184,13 @@ jobbot resume import ~/Documents/resume.pdf
 #    ...or, if you have several, let it pick the right one per job:
 #    jobbot resume import-folder ~/Documents/resumes
 
-# 4. check everything is actually wired up before you spend a real run
+# 4. answer the questions that otherwise stop every application — once
+jobbot setup
+
+# 5. check everything is actually wired up before you spend a real run
 jobbot doctor
 
-# 5. go
+# 6. go
 jobbot run --min-score 80 --limit 5
 ```
 
@@ -198,9 +201,23 @@ in, because the setting that matters most is whether applications get sent
 without you looking at them. It touches no job boards and makes no LLM
 calls.
 
-**Nothing is submitted without you.** The default is review mode: every
-application stops on a screenshot plus the list of fields it could not fill,
-and waits for you to type `yes`. Auto-submit exists and is off.
+**Nothing is submitted without you, by default.** Review mode stops every
+application on a screenshot plus the list of fields it could not fill, and
+waits for you to type `yes`.
+
+**To make runs unattended**, `jobbot setup` is the step that matters. Work
+authorization, sponsorship, EEO questions and legal attestations are never
+answered by the model — so before you answer them, *every* application stops,
+and auto-submit switches itself off even when enabled. `jobbot setup` asks
+them once, in your own words; after that there is nothing left to stop on.
+The guardrail is unchanged — the answers come from you, and a model guess
+still never qualifies. Then set `JOBBOT_AUTOFILL_SENSITIVE=true` and
+`JOBBOT_AUTO_SUBMIT=true`.
+
+`jobbot doctor` tells you plainly which of those three conditions still
+holds you back, and `jobbot answers` shows what you have answered so far.
+Every question is skippable; a skipped one keeps stopping for you, which is
+the right behaviour for anything you would rather decide case by case.
 
 **Sensitive questions always stop.** Work authorization, visa sponsorship,
 veteran status, disability, race/ethnicity and legal attestations are never

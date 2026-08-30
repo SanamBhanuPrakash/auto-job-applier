@@ -692,6 +692,150 @@ def run_eval(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def setup(
+    region: str = typer.Option(
+        "", help="Comma-separated: US, INDIA, EU_UK. Asked if omitted."),
+    redo: bool = typer.Option(False, "--redo", help="Ask again about questions already answered"),
+) -> None:
+    """Answer the questions that otherwise stop every run — once.
+
+    Work authorization, sponsorship, EEO questions and legal attestations
+    are never answered by the model, so every application that asks one
+    stops for you. Answering them here, in your own words, is what makes
+    unattended runs possible: the guardrail is unchanged, there is just
+    nothing left for it to block.
+
+    Every question is skippable. Anything you skip keeps stopping for you,
+    which is the right behaviour for a question you would rather handle
+    case by case.
+    """
+    from jobbot.onboarding import (
+        Region, answered_keys, questions_for, save_answer, unattended_readiness,
+    )
+
+    if region:
+        try:
+            regions = tuple(Region(r.strip().upper()) for r in region.split(",") if r.strip())
+        except ValueError:
+            console.print("[red]region must be one or more of: US, INDIA, EU_UK[/red]")
+            raise typer.Exit(code=1) from None
+    else:
+        console.print("Which job markets are you applying in?")
+        console.print("  [bold]1[/bold] United States   [bold]2[/bold] India   "
+                      "[bold]3[/bold] UK/EU   [bold]4[/bold] all of them")
+        choice = typer.prompt("Choose", default="1")
+        regions = {
+            "1": (Region.US,), "2": (Region.INDIA,), "3": (Region.EU_UK,),
+            "4": (Region.US, Region.INDIA, Region.EU_UK),
+        }.get(choice.strip(), (Region.US,))
+
+    already = set() if redo else answered_keys()
+    questions = [q for q in questions_for(regions) if q.key not in already]
+
+    if not questions:
+        console.print("[green]Everything is already answered.[/green] "
+                      "Use --redo to change an answer.")
+    else:
+        console.print(
+            f"\n{len(questions)} question(s). Press [bold]Enter[/bold] to skip any one — "
+            "a skipped question keeps stopping for you on every application.\n"
+        )
+
+    saved = 0
+    for i, question in enumerate(questions, 1):
+        console.print(f"[bold]{i}/{len(questions)}[/bold]  {question.prompt}")
+        if question.help:
+            console.print(f"      [dim]{question.help}[/dim]")
+        if question.options:
+            for n, option in enumerate(question.options, 1):
+                console.print(f"      [bold]{n}[/bold]) {option}")
+            raw = typer.prompt("      Answer (number, or Enter to skip)", default="",
+                               show_default=False)
+            if not raw.strip():
+                console.print("      [dim]skipped[/dim]\n")
+                continue
+            try:
+                value = question.options[int(raw.strip()) - 1]
+            except (ValueError, IndexError):
+                console.print("      [yellow]not a listed option — skipped[/yellow]\n")
+                continue
+        else:
+            value = typer.prompt("      Answer (or Enter to skip)", default="",
+                                 show_default=False).strip()
+            if not value:
+                console.print("      [dim]skipped[/dim]\n")
+                continue
+        save_answer(question, value)
+        saved += 1
+        console.print(f"      [green]saved[/green]: {value}\n")
+
+    if saved:
+        console.print(f"[green]{saved} answer(s) saved[/green] as your own, confirmed "
+                      "answers — a model guess never qualifies for these fields.")
+
+    _print_unattended_status(unattended_readiness(regions))
+
+
+def _print_unattended_status(status: dict) -> None:
+    """Say plainly whether a run will now proceed without stopping."""
+    console.print("\n[bold]Unattended runs[/bold]")
+    console.print(f"  answered: {status['answered']}/{status['relevant']} relevant questions")
+
+    blockers = []
+    if status["missing_sensitive"]:
+        blockers.append(
+            "these still stop for you: " + ", ".join(status["missing_sensitive"]))
+    if not status["autofill_sensitive_enabled"]:
+        blockers.append("JOBBOT_AUTOFILL_SENSITIVE=false — your saved answers are not reused")
+    if not status["auto_submit_enabled"]:
+        blockers.append("JOBBOT_AUTO_SUBMIT=false — every application waits for your review")
+
+    if status["will_run_unattended"]:
+        console.print("  [green]A run will submit without stopping.[/green] "
+                      "Applications are irreversible; `jobbot ledger` shows what was sent.")
+        return
+    for b in blockers:
+        console.print(f"  [yellow]•[/yellow] {b}")
+    if not status["missing_sensitive"]:
+        console.print("\n  Nothing is unanswered. To let runs submit unattended, set both "
+                      "[bold]JOBBOT_AUTOFILL_SENSITIVE=true[/bold] and "
+                      "[bold]JOBBOT_AUTO_SUBMIT=true[/bold] in .env.")
+
+
+@app.command()
+def answers(
+    show_values: bool = typer.Option(False, "--values", help="Print the saved answers"),
+) -> None:
+    """What you have answered, and what still stops a run."""
+    from jobbot.db import session_scope
+    from jobbot.learning import store as learning_store
+    from jobbot.onboarding import CATALOGUE, Region, answered_keys, unattended_readiness
+
+    answered = answered_keys()
+    table = Table(title="Onboarding answers")
+    table.add_column("question", overflow="fold")
+    table.add_column("market")
+    table.add_column("status")
+    if show_values:
+        table.add_column("answer", overflow="fold")
+
+    with session_scope() as session:
+        for q in CATALOGUE:
+            done = q.key in answered
+            status = "[green]answered[/green]" if done else "[yellow]stops a run[/yellow]"
+            if not q.sensitive and not done:
+                status = "[dim]not answered[/dim]"
+            row = [q.prompt, q.region.value, status]
+            if show_values:
+                match = learning_store.find_match(session, q.prompt, q.field_type)
+                row.append(match.value if (done and match) else "-")
+            table.add_row(*row)
+    console.print(table)
+    _print_unattended_status(unattended_readiness(
+        (Region.US, Region.INDIA, Region.EU_UK)))
+
+
 auth_app = typer.Typer(help="Sign-in credentials for sites that require an account.")
 app.add_typer(auth_app, name="auth")
 

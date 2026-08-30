@@ -223,10 +223,46 @@ def _check_signup() -> Check:
                  "set JOBBOT_ALLOW_SIGNUP=false unless you meant this")
 
 
+def _check_unattended() -> Check:
+    """Whether a run will actually proceed without stopping.
+
+    This is the question people mean by "is it automatic". It has three
+    independent answers — the questions are answered, saved answers are
+    reused, and submission is unattended — and all three must hold. A
+    check that reported only one of them would be misleading in the
+    direction that matters.
+    """
+    from jobbot.onboarding import Region, unattended_readiness
+
+    status = unattended_readiness((Region.US, Region.INDIA, Region.EU_UK))
+    missing = status["missing_sensitive"]
+
+    if status["will_run_unattended"]:
+        return Check("unattended runs", Status.WARN,
+                     "ON — applications will be submitted without your review, using the "
+                     "answers you gave in `jobbot setup`",
+                     "`jobbot ledger` shows everything sent; applications cannot be recalled")
+
+    reasons = []
+    if missing:
+        reasons.append(f"{len(missing)} sensitive question(s) unanswered "
+                       f"({', '.join(missing[:3])}{'...' if len(missing) > 3 else ''})")
+    if not status["autofill_sensitive_enabled"]:
+        reasons.append("saved answers are not reused (JOBBOT_AUTOFILL_SENSITIVE=false)")
+    if not status["auto_submit_enabled"]:
+        reasons.append("every application waits for review (JOBBOT_AUTO_SUBMIT=false)")
+
+    fix = "run `jobbot setup`" if missing else (
+        "set JOBBOT_AUTOFILL_SENSITIVE=true and JOBBOT_AUTO_SUBMIT=true in .env")
+    return Check("unattended runs", Status.OK,
+                 "off — " + "; ".join(reasons), fix)
+
+
 CHECKS = (
     _check_profile, _check_resume, _check_resume_folder, _check_llm,
     _check_browser, _check_database, _check_submission_mode,
     _check_sensitive_autofill, _check_agent, _check_auth, _check_signup,
+    _check_unattended,
 )
 
 

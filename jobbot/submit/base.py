@@ -48,6 +48,7 @@ from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
 from jobbot.submit.form_scan import find_target_frame, scan_form
+from jobbot.submit.memory_plan import build_memory_plan
 from jobbot.submit.review import show_review, wait_for_submit_or_close
 from jobbot.submit.static_answers import resolve_static_fields
 from jobbot.submit.takeover_bridge import reach_application_form
@@ -257,52 +258,20 @@ def apply_to_job(
             # --- resolve fields from memory / circuit breaker ------------
             with session_scope() as session:
                 matches = learning_store.match_fields(session, fields)
-                by_id = {f.field_id: f for f in fields}
-                learned: dict[int, dict] = {}
-                for fid, m in matches.items():
-                    field = by_id[fid]
-                    if not learning_store.value_still_offerable(field, m.value):
-                        continue  # this posting doesn't offer the remembered option
-                    learned[fid] = {
-                        "value": m.value,
-                        "sensitive": m.sensitive,
-                        "times_used": m.times_used,
-                        "trusted": may_autofill_sensitive(m.provenance or "", bool(m.human_confirmed)),
-                    }
                 circuit_broken_ids = {
                     f.field_id for f in fields if learning_store.is_circuit_broken(session, f.label)
                 }
 
-            memory_hints = {fid: h["value"] for fid, h in learned.items() if h["sensitive"]}
-            by_field_id = {f.field_id: f for f in fields}
-
-            def _may_autofill(hint: dict) -> bool:
-                if not hint["sensitive"]:
-                    return True
-                # A sensitive question is only auto-answered when the run
-                # authorized it AND the remembered value is actually
-                # trustworthy — a model guess never qualifies, however
-                # many times it has been reused.
-                return autofill_sensitive and hint["trusted"]
-
-            auto_filled_sensitive = [
-                (by_field_id[fid].label, h["value"])
-                for fid, h in learned.items()
-                if h["sensitive"] and _may_autofill(h)
-            ]
-
-            remembered_plan: dict[int, dict] = {}
-            for fid, h in learned.items():
-                if not _may_autofill(h):
-                    continue
-                remembered_plan[fid] = {
-                    "value": h["value"],
-                    "needs_human": False,
-                    "reasoning": (
-                        f"Auto-filled from your confirmed answer (used {h['times_used']} time(s) before)"
-                        + (" — sensitive-field autofill is enabled." if h["sensitive"] else ".")
-                    ),
-                }
+            memory = build_memory_plan(
+                fields, matches,
+                autofill_sensitive=autofill_sensitive,
+                value_still_offerable=learning_store.value_still_offerable,
+            )
+            memory_hints = memory.hints
+            auto_filled_sensitive = memory.auto_filled_sensitive
+            remembered_plan = memory.remembered
+            for label, why in memory.withheld:
+                log.info("Not auto-filling %r: %s", label, why)
 
             circuit_broken_plan = {
                 fid: {

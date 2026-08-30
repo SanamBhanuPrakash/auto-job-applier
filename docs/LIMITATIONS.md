@@ -82,17 +82,30 @@ Per-step agent traces exist in memory during a run and are summarised into
 the state ledger. They are not written per step, so a post-hoc audit of
 exactly what the agent did on application 47 is not currently possible.
 
-## Sensitive questions are never answered automatically
+## Sensitive questions are never answered *by the model*
 
-By design, not by omission. Work authorization, visa sponsorship, veteran
-status, disability, race/ethnicity and legal attestations always stop and
-ask you. Even with `JOBBOT_AUTOFILL_SENSITIVE=true`, only values you
-previously **confirmed yourself** are reused — a model guess never
-qualifies, no matter how many times it has been reused before.
+Work authorization, visa sponsorship, veteran status, disability,
+race/ethnicity and legal attestations are never filled from anything the
+LLM produced. That rule has not been relaxed and will not be.
 
-This means unattended operation is not fully unattended on any application
-that asks one of those questions, which in practice is most US
-applications.
+What changed: `jobbot setup` asks those questions **once, of you**, and
+stores the answers with human provenance. After that they fill
+automatically, because the answer came from the candidate rather than from
+a model. Three separate things must all be true for a run to submit
+without stopping:
+
+1. the relevant questions are answered (`jobbot setup`),
+2. `JOBBOT_AUTOFILL_SENSITIVE=true` — saved answers are reused,
+3. `JOBBOT_AUTO_SUBMIT=true` — submission is unattended.
+
+`jobbot doctor` reports which of the three still holds you back.
+
+Anything you skip in `jobbot setup` keeps stopping for you, which is the
+right behaviour for a question you would rather decide case by case. And
+one of the catalogue questions is a legal attestation ("I certify that the
+information provided is true and accurate") — answering it in advance
+means you are making that statement yourself, ahead of time, for
+applications this tool submits. It is skippable for that reason.
 
 ## CAPTCHA and bot detection
 
