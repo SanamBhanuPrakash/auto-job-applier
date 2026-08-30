@@ -16,6 +16,7 @@ from jobbot.llm import DailyQuotaExceeded, call_tool
 from jobbot.matching.profile_select import best_profile_for_job
 from jobbot.models import Job, JobScore
 from jobbot.resume import multi as multi_resume
+from jobbot.agent.prompting import build_prompt, system_with_notice
 from jobbot.resume.schema import Profile
 
 log = logging.getLogger(__name__)
@@ -59,7 +60,14 @@ def _profile_summary(profile: Profile) -> str:
     return profile.facts_json_for_llm()
 
 
-def _batch_prompt(profile: Profile, jobs: list[Job]) -> str:
+def _batch_prompt(profile: Profile, jobs: list[Job]):
+    """Build the scoring prompt with the postings in an untrusted channel.
+
+    Scoring is where injected text has the most direct leverage: a posting
+    that talks the model into a 95 gets applied to. Titles, companies and
+    locations are fenced along with the description because all of them
+    are scraped, not ours (spec §39).
+    """
     job_blocks = []
     for job in jobs:
         desc = (job.description or "")[:800]
@@ -67,17 +75,27 @@ def _batch_prompt(profile: Profile, jobs: list[Job]) -> str:
             f"job_id: {job.id}\ncompany: {job.company}\ntitle: {job.title}\n"
             f"location: {job.location}\nremote: {job.remote}\ndescription: {desc}"
         )
-    return (
-        f"Candidate profile:\n{_profile_summary(profile)}\n\n"
-        f"Jobs to score:\n\n" + "\n\n---\n\n".join(job_blocks)
+    return build_prompt(
+        objective="Score how well each job below fits this candidate, 0-100.",
+        candidate_facts=_profile_summary(profile),
+        untrusted={"job postings": "\n\n---\n\n".join(job_blocks)},
     )
 
 
 def _score_batch(profile: Profile, batch: list[Job], lex_by_id: dict[int, float], tag: str) -> None:
     log.info("Scoring batch of %d job(s) against profile %r", len(batch), tag or "(default)")
+    user_message, report = _batch_prompt(profile, batch)
+    if report.suspicious:
+        # A posting trying to talk the scorer into a high score is the
+        # cheapest way to get itself applied to. Recorded, not silently
+        # dropped: a legitimate description may contain these words.
+        log.warning(
+            "Injection-shaped content in batch %s: %s",
+            [j.id for j in batch], ", ".join(sorted(set(report.hits))),
+        )
     result = call_tool(
-        system=_SYSTEM,
-        user_message=_batch_prompt(profile, batch),
+        system=system_with_notice(_SYSTEM),
+        user_message=user_message,
         tool_name="record_scores",
         tool_description="Record the fit score and reasoning for each job in this batch.",
         input_schema=_SCORE_TOOL_SCHEMA,

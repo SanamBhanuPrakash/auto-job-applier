@@ -1,7 +1,8 @@
 # Gap map: spec capability → current tree
 
-Updated as slices land. Current tree: Phases 1-7 complete, 407 tests passing
-(1 skipped). Last assessed after the Phase 6-7 slice.
+Updated as slices land. Current tree: Phases 1-10 complete, 455 tests passing
+(1 skipped), plus a 48-scenario fault-injection suite (37 pass / 11 skip for
+unbuilt capabilities). Last assessed after the Phase 8-10 slice.
 
 Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred)
 
@@ -12,7 +13,7 @@ Legend: **DONE** · **PARTIAL** · **GAP** · **N/A-yet** (deliberately deferred
 | Canonical identity (cross-source) | DONE | `agent/identity.py` |
 | Idempotency / unique application ownership | DONE | `agent/statestore.py` + UNIQUE index |
 | Persistent state machine | DONE | `agent/states.py` |
-| Leases / concurrency | PARTIAL | leases DONE; **browser-profile isolation is a GAP** (one shared user-data dir) |
+| Leases / concurrency | DONE | leases + per-worker Chromium profile (`_user_data_dir(worker_id)`) |
 | Provenance-aware memory | DONE | `learning/provenance.py` |
 | Sensitive-field policy | DONE | `submit/fill_planner.py` (code-level, not prompt-level) |
 | Evidence-based submission verification | DONE | `submit/verify.py` |
@@ -72,11 +73,35 @@ existing first; building it before those would mean rewriting it.
 | Structured `JobRequirements` (hard vs soft) | **GAP** — eligibility is still one 0–100 score |
 | Cross-source dedup | DONE (`identity.py`) |
 
-## Evaluation — GAP (highest-value after the loop)
+## Evaluation — DONE (Phase 9)
 
-No fault-injection harness, no false-submission/duplicate-rate measurement.
-Per `browser-agent-failures.md` §1 this is what actually predicts production
-behaviour, so it ranks above adding more capability.
+`jobbot/eval` declares all 48 spec scenarios and runs 37 against real
+Chromium under injected faults (network drop, 5xx, DOM mutation, frame
+replacement, popup, hidden DOM, fake confirmation, crash, LLM failure).
+Eleven are SKIP with a named missing capability — never passes. Run it with
+`jobbot eval` or as part of `pytest`.
+
+| Capability | Status |
+|---|---|
+| Fault injectors | DONE (`eval/faults.py`) |
+| Critical metrics (false/duplicate/wrong-sensitive) | DONE, all 0.00% |
+| Unmeasured metric reported as unmeasured, not clean | DONE |
+| Runs in CI / on every change | DONE (`tests/test_eval_harness.py`) |
+| Real-posting integration run | **GAP** — see docs/LIMITATIONS.md |
+
+It earned its place immediately: the first run found a false-submission
+defect (failures §17).
+
+## Prompt-injection isolation — DONE (Phase 8)
+
+| Capability | Status | Where |
+|---|---|---|
+| Channel separation (trusted vs untrusted) | DONE | `agent/prompting.py` |
+| Fence-break / channel-forgery neutralisation | DONE | nonce-tagged blocks |
+| Applied to fill planning | DONE | `submit/fill_planner.py` |
+| Applied to job scoring | DONE | `matching/score.py` |
+| Injection attempts recorded per application | DONE | state-transition detail |
+| Adversarial tests | DONE | `tests/test_prompt_injection.py` |
 
 ---
 
@@ -90,17 +115,19 @@ behaviour, so it ranks above adding more capability.
    `submit/base.py` now hands the browser to the agent when the form scan
    comes up empty, and never walks an empty form to READY_TO_SUBMIT again.
    Found three real defects on the way: failures §14, §15, §16.
-4. **Prompt-injection channel separation** (Phase 8) ← *next*. Still a live
-   gap: job descriptions and scraped labels reach prompts undelimited.
-5. Fault-injection evaluation harness (Phase 9). Ranked high: per
-   browser-agent-failures.md §1 this is what predicts production behaviour.
-   Phases 6–7 raise its value again — recovery ladders and takeover are
-   exactly what fault injection measures, and they are currently tested
-   against fixtures rather than injected faults.
-6. Browser identity/profile isolation (Phase 10) — fixes the concurrency gap.
-7. Auth orchestrator (Phases 11–14). `REAUTHENTICATE` is the one recovery
-   action that reports itself unavailable; this is what fills it in.
-8. Structured `JobRequirements`; location normalization; search discovery.
+4. ~~**Prompt-injection channel separation**~~ — DONE (Phase 8).
+5. ~~**Fault-injection evaluation harness**~~ — DONE (Phase 9). Found a
+   false-submission defect on its first run (failures §17).
+6. ~~**Browser identity/profile isolation**~~ — DONE (Phase 10).
+7. **Auth orchestrator** (Phases 11–14) ← *next*, and now clearly the
+   binding constraint: eleven of the 48 eval scenarios skip for want of it,
+   `REAUTHENTICATE` is the one recovery action that reports itself
+   unavailable, and most real applications behind an account wall stop at a
+   human. See docs/PRODUCTION_READINESS.md for why this blocks Level 2.
+8. Per-step trace persistence — the other Level-2 blocker (§96 "traces are
+   complete"). Small, and it makes a pilot auditable after the fact.
+9. Multi-page application flow control.
+10. Structured `JobRequirements`; location normalization; search discovery.
 
 Playwright MCP (spec §62/§121) is unblocked and now has somewhere to
 plug in: `ToolResult`, the registry, and a `Decider` protocol all exist,

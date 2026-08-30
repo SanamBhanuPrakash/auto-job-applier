@@ -292,6 +292,70 @@ volume, and benchmark scores do not measure this.
   every time reported `steps: 0`. Both numbers are now reported, as
   `steps`, `executed_steps` and `denied_steps`.
 
+## 17. A page can say two incompatible things at once
+
+- **Reproduced:** by the fault-injection harness on its **first run** —
+  `jobbot/eval` scenario `false_confirmation` prepends confirmation
+  wording to a page whose form is still sitting there unsent.
+  `verify_submission` returned **SUBMITTED**.
+- **Severity:** the worst outcome this project has. A false submission is
+  unrecoverable — nothing is un-sent, and the application is now marked
+  done, so we will never apply to that posting again. This is the metric
+  §93 ranks first.
+- **Root cause:** signals were graded strong vs. weak (§3), and a strong
+  signal returned SUBMITTED unconditionally. Nothing looked for evidence
+  *against*. Confirmation wording on a page where the same form is still
+  live at the same URL is not weak evidence of success — it is a
+  contradiction, and it happens with a stale success banner above a
+  re-rendered form, with careers pages carrying "thank you for your
+  interest" as boilerplate, and with a validation failure that left an
+  earlier confirmation visible.
+- **Lesson:** grading evidence by strength is not enough; a verifier also
+  has to look for evidence that contradicts its conclusion. "What would be
+  true if I am wrong?" is a different question from "how strong is my best
+  signal?", and only the second one was being asked.
+- **Our response:** a confirmation-text signal is discarded in favour of
+  `UNKNOWN` when the page did not navigate and the form is still
+  *visible*. Visibility rather than presence, because an app that submits
+  over XHR typically hides the form instead of removing it — tested by
+  `test_a_hidden_form_left_behind_after_an_xhr_submit_still_verifies`. A
+  confirmation *URL* is not subject to the rule: reaching one means we
+  actually navigated somewhere named like a confirmation. Regressions in
+  `tests/test_false_confirmation.py`.
+
+### 17b. The same bug, one layer down: a selector that never matched
+
+Found while fixing the above. `verify_submission` emitted the weak signal
+*"submit control no longer present"* whenever `submit_selector` matched
+nothing — including when it had **never** matched, because it was stale or
+belonged to a different ATS. An absence that was there all along was being
+counted as a change.
+
+This is failures §14 again in a third module. The fix is the same shape:
+`submit_present_before` lets a caller that clicked the button say so, and
+when the caller does not say, a still-visible form with no submit control
+anywhere is inferred to be a selector mismatch rather than progress —
+because a live form with no submit control is not a coherent page.
+
+## 18. An evaluation harness that only lists what works measures nothing
+
+- **Observed while building the harness**, not as a bug in it: of the 48
+  scenarios spec §91 names, eleven need capabilities this system does not
+  have (auth, multi-page flows, process-level crash injection).
+- **The tempting shape** is to write the harness over the 37 that can run.
+  It would report a clean sweep, and that report would be actively
+  misleading — indistinguishable from a system that handles all 48.
+- **Our response:** all 48 are declared. An unbuilt one carries a
+  `requires=` string naming what is missing, runs as SKIP, and is listed
+  by name in the report every single time it runs. "We have not built
+  this" and "we built this and it works" never look the same.
+- **Related:** the same reasoning applies to the metrics themselves. A
+  rate computed over zero observations is `None`, not `0.0`, and
+  `EvalReport.critical_clean` is False when any critical metric is
+  unmeasured — because the gate asks for *evidence* of zero harm, and
+  "we never looked" is not that. This is failures §14 applied to
+  measurement rather than to recovery.
+
 ---
 
 ## Template for new entries

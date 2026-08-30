@@ -29,6 +29,7 @@ between runs; a fresh profile per run re-triggers 2FA/CAPTCHA every time.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
@@ -66,11 +67,30 @@ class UnsupportedATS(ValueError):
     """
 
 
-def _user_data_dir() -> Path:
+def _user_data_dir(worker_id: str = "") -> Path:
+    """The Chromium profile directory for this worker (spec §84).
+
+    One shared directory across concurrent workers is a real corruption
+    risk, not a theoretical one: Chromium takes a `SingletonLock` on a
+    user-data dir, so a second `launch_persistent_context` against the
+    same path either fails or silently attaches to the first browser's
+    session — sharing cookies, and with them the logged-in identity and
+    any rate-limit state. Each worker gets its own directory, and the
+    default worker keeps the original path so existing profiles (and any
+    manual login already saved there) still work.
+    """
     settings = get_settings()
-    d = settings.data_dir / "browser_profile"
-    d.mkdir(exist_ok=True)
+    name = "browser_profile" if not worker_id else f"browser_profile_{_safe_worker(worker_id)}"
+    d = settings.data_dir / name
+    d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _safe_worker(worker_id: str) -> str:
+    """Worker ids reach the filesystem, so they are constrained here rather
+    than trusted. Anything outside [A-Za-z0-9_-] is replaced."""
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", worker_id).strip("_")
+    return (cleaned or "worker")[:40]
 
 
 def _resolve_profile_and_resume(job: Job) -> tuple[Profile, Path]:
@@ -110,6 +130,7 @@ def apply_to_job(
     run_id: str = "",
     auto_submit_override: bool | None = None,
     autofill_sensitive_override: bool | None = None,
+    worker_id: str = "",
 ) -> Application | None:
     """Attempt one application. Returns None if the job could not be
     claimed (already done, held by another worker, or parked awaiting a
@@ -143,7 +164,7 @@ def apply_to_job(
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
-            str(_user_data_dir()), headless=settings.jobbot_headless
+            str(_user_data_dir(worker_id)), headless=settings.jobbot_headless
         )
         page = context.new_page()
         try:
@@ -297,7 +318,10 @@ def apply_to_job(
                           f"{len(llm_fields)} to plan"),
                   run_id=run_id)
 
-            llm_plan = build_fill_plan(profile, llm_fields, job_context)
+            injection_reports: list[dict] = []
+            llm_plan = build_fill_plan(
+                profile, llm_fields, job_context, injection_report=injection_reports,
+            )
             # Only genuine model output counts as a guess for provenance;
             # static answers come straight from the candidate's own profile.
             model_filled_ids = {
@@ -337,9 +361,24 @@ def apply_to_job(
                 app.screenshot_path = str(screenshot_path)
                 session.commit()
 
+            # Injection attempts are recorded on the transition, so they
+            # are a measurable rate per run rather than a log line nobody
+            # reads (§39). They never block on their own: a description
+            # legitimately containing "ignore" must not fail an
+            # application, and the actual defence is that page text has no
+            # authority in the first place.
+            suspicious = [r for r in injection_reports if r.get("suspicious")]
+            ready_detail = {"screenshot": str(screenshot_path)}
+            if suspicious:
+                ready_detail["injection_signals"] = suspicious
+                log.warning(
+                    "Application %d: %d injection-shaped block(s) in this posting",
+                    app_id, len(suspicious),
+                )
+
             _park(app_id, ApplicationState.READY_TO_SUBMIT,
                   reason="form filled and verified", run_id=run_id,
-                  detail={"screenshot": str(screenshot_path)})
+                  detail=ready_detail)
 
             show_review(job, screenshot_path, needs_human, memory_hints, auto_filled_sensitive)
 
@@ -374,6 +413,10 @@ def apply_to_job(
                 page, form_ctx,
                 url_before=submitted_attempt,
                 submit_selector=ats_module.SUBMIT_SELECTOR,
+                # We got here by clicking that control, so it was there.
+                # Saying so stops a later absence being read as a
+                # selector mismatch instead of as progress.
+                submit_present_before=True,
             )
             post_shot = settings.data_dir / "screenshots" / f"application_{app_id}_post.png"
             try:
@@ -527,6 +570,7 @@ def apply_to_jobs(
     run_id: str = "",
     auto_submit_override: bool | None = None,
     autofill_sensitive_override: bool | None = None,
+    worker_id: str = "",
 ) -> list[Application]:
     from jobbot.utils.ratelimit import human_pause
 
@@ -539,6 +583,7 @@ def apply_to_jobs(
                 run_id=run_id,
                 auto_submit_override=auto_submit_override,
                 autofill_sensitive_override=autofill_sensitive_override,
+                worker_id=worker_id,
             )
         except UnsupportedATS as exc:
             # One unsupported posting must not abort every application

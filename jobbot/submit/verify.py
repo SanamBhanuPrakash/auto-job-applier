@@ -137,6 +137,21 @@ def _count(ctx: FrameLike, selector: str) -> int:
         return 0
 
 
+def _visible_count(ctx: FrameLike, selector: str) -> int:
+    """Elements a user could actually interact with.
+
+    Presence and visibility differ in a way that matters here: an app that
+    submits over XHR often leaves the form in the DOM and hides it, so
+    counting nodes would read "form still there" on a page that really did
+    submit.
+    """
+    try:
+        locator = ctx.locator(selector)
+        return sum(1 for i in range(locator.count()) if locator.nth(i).is_visible())
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def detect_blocking(page, ctx: FrameLike | None = None) -> str | None:
     """Return a description of any CAPTCHA/MFA/bot wall present, else None."""
     for selector in _BLOCKING_SELECTORS:
@@ -160,8 +175,17 @@ def verify_submission(
     url_before: str,
     submit_selector: str = "",
     settle_ms: int = 3000,
+    submit_present_before: bool | None = None,
 ) -> VerificationResult:
-    """Inspect the post-click page and classify what actually happened."""
+    """Inspect the post-click page and classify what actually happened.
+
+    `submit_present_before` says whether `submit_selector` actually matched
+    the control we clicked. Without it, a selector that never matched
+    anything — a stale one, or one for a different ATS — makes the submit
+    button look like it "disappeared", manufacturing a weak signal out of
+    an absence that was there all along. Callers that clicked the button
+    know the answer and should pass True.
+    """
     try:
         page.wait_for_timeout(settle_ms)
     except Exception:  # noqa: BLE001
@@ -206,8 +230,22 @@ def verify_submission(
     if form_gone:
         weak.append("application form no longer present")
 
+    form_still_live = _visible_count(form_ctx, "form") > 0
     if submit_selector and _count(form_ctx, submit_selector) == 0:
-        weak.append("submit control no longer present")
+        # Only evidence if the control was there to begin with. When the
+        # caller did not say, infer it: a still-visible form with no submit
+        # control anywhere is not a coherent page, it is a selector that
+        # does not match this site. Counting that as progress is the same
+        # absence-as-evidence mistake as failures §14.
+        was_there = (submit_present_before if submit_present_before is not None
+                     else not form_still_live)
+        if was_there:
+            weak.append("submit control no longer present")
+        else:
+            evidence.append(
+                f"note: submit selector {submit_selector!r} matches nothing and the form "
+                "is still visible - treating this as a selector mismatch, not as progress"
+            )
 
     evidence.extend(strong)
     evidence.extend(weak)
@@ -222,6 +260,33 @@ def verify_submission(
             return VerificationResult(
                 SubmissionVerdict.NOT_SUBMITTED, evidence, final_url=url_after
             )
+
+    # 4. Contradiction beats a strong signal (spec §33).
+    #
+    #    A page can say two incompatible things at once: confirmation
+    #    wording *and* the same unsent form still sitting there, live, at
+    #    the same URL. That happens with a stale success banner above a
+    #    re-rendered form, with a careers page that carries "thank you for
+    #    your interest" as boilerplate, and with a validation failure that
+    #    left an earlier confirmation visible.
+    #
+    #    Reading that as SUBMITTED is a false submission, which is the
+    #    single worst outcome this module exists to prevent — it is
+    #    unrecoverable, and it stops us ever applying to that posting
+    #    again. Found by the fault-injection harness
+    #    (jobbot/eval, scenario `false_confirmation`); see
+    #    docs/research/browser-agent-failures.md §17.
+    #
+    #    Visibility, not presence, decides: an app that submits over XHR
+    #    typically hides the form rather than removing it.
+    confirmation_url = any(e.startswith("confirmation URL") for e in strong)
+
+    if confirmation_text and not confirmation_url and not navigated and form_still_live:
+        evidence.append(
+            "contradiction: confirmation wording present, but the application form is "
+            "still visible at the same URL"
+        )
+        return VerificationResult(SubmissionVerdict.UNKNOWN, evidence, final_url=url_after)
 
     if strong:
         return VerificationResult(

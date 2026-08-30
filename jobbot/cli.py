@@ -628,5 +628,69 @@ def learned_issues(limit: int = typer.Option(50)) -> None:
     console.print(table)
 
 
+@app.command()
+def doctor() -> None:
+    """Check everything that has to be true before a real run.
+
+    Run this first, and after changing .env. It touches nothing external:
+    no job boards, no LLM calls, no applications.
+    """
+    from jobbot.preflight import Status, ready, run_preflight
+
+    results = run_preflight()
+    colours = {Status.OK: "green", Status.WARN: "yellow", Status.FAIL: "red"}
+
+    table = Table(title="jobbot preflight")
+    table.add_column("")
+    table.add_column("check")
+    table.add_column("detail", overflow="fold")
+    for c in results:
+        table.add_row(f"[{colours[c.status]}]{c.status.value}[/]", c.name, c.detail)
+    console.print(table)
+
+    fixes = [c for c in results if c.fix and c.status is not Status.OK]
+    if fixes:
+        console.print("\n[bold]To fix:[/bold]")
+        for c in fixes:
+            console.print(f"  • {c.name}: {c.fix}")
+
+    if ready(results):
+        console.print("\n[green]Ready.[/green] Next: [bold]jobbot run[/bold] "
+                      "(discover → match → apply, with review before every submit).")
+    else:
+        console.print("\n[red]Not ready[/red] — fix the FAIL rows above, then run "
+                      "[bold]jobbot doctor[/bold] again.")
+        raise typer.Exit(code=1)
+
+
+@app.command(name="eval")
+def run_eval(
+    only: str = typer.Option("", help="Run one scenario or one category (e.g. 'safety')"),
+    json_out: Path = typer.Option(None, "--json", help="Write the full report here"),
+) -> None:
+    """Run the fault-injection evaluation suite (spec §91-§94).
+
+    Offline and free: local fixture pages, no LLM calls, no job boards.
+    The three critical metrics — false submission, duplicate submission and
+    wrong sensitive answer — must all read 0.00% before any production
+    claim. Scenarios whose capability is not built are reported SKIP by
+    name, never as passes.
+    """
+    import os
+
+    from jobbot.eval.runner import run_evaluation
+
+    report = run_evaluation(only=only,
+                            chromium_path=os.environ.get("JOBBOT_TEST_CHROMIUM_PATH") or None)
+    console.print(report.render())
+    if json_out:
+        Path(json_out).write_text(report.to_json())
+        console.print(f"Full report written to {json_out}")
+
+    gate = report.gate_summary()
+    if gate["failed_scenarios"] or not gate["critical_metrics_clean"]:
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()

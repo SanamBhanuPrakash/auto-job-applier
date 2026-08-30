@@ -165,6 +165,58 @@ not per-resume — with multiple resumes spanning different domains
 per-resume matching happens, so keep it broad rather than narrowly backend-
 specific if you're relying on `config/resumes/`.
 
+## Quickstart
+
+Five commands from nothing to your first reviewed application.
+
+```bash
+# 1. install
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]" && playwright install chromium
+
+# 2. configure — copy the examples, then put an LLM key in .env
+cp .env.example .env
+cp config/companies.example.yaml config/companies.yaml
+cp config/settings.example.yaml config/settings.yaml
+
+# 3. import your resume (one LLM call; writes config/profile.yaml)
+jobbot resume import ~/Documents/resume.pdf
+#    ...or, if you have several, let it pick the right one per job:
+#    jobbot resume import-folder ~/Documents/resumes
+
+# 4. check everything is actually wired up before you spend a real run
+jobbot doctor
+
+# 5. go
+jobbot run --min-score 80 --limit 5
+```
+
+`jobbot doctor` is the one to run first, and again any time you change
+`.env`. It checks the profile, the resume file, the LLM key, that Chromium
+launches, that the database is readable — and tells you which mode you are
+in, because the setting that matters most is whether applications get sent
+without you looking at them. It touches no job boards and makes no LLM
+calls.
+
+**Nothing is submitted without you.** The default is review mode: every
+application stops on a screenshot plus the list of fields it could not fill,
+and waits for you to type `yes`. Auto-submit exists and is off.
+
+**Sensitive questions always stop.** Work authorization, visa sponsorship,
+veteran status, disability, race/ethnicity and legal attestations are never
+answered by the model — see "Guardrails" below.
+
+To see what the safety machinery actually does, under injected faults:
+
+```bash
+jobbot eval          # ~40s, offline, no LLM calls, no job boards
+```
+
+Read [docs/LIMITATIONS.md](docs/LIMITATIONS.md) before trusting it with
+anything that matters. The short version: it has never been run end to end
+against a real posting, it does not handle logins, and it deliberately does
+not touch LinkedIn or Indeed.
+
 ## Setup
 
 Requires Python 3.11+.

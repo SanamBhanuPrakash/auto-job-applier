@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Application — Acme (custom UI)</title></head>
+<body>
+<form id="application-form">
+  <div><label for="first_name">First Name*</label><input id="first_name" required></div>
+  <div><label for="email">Email*</label><input type="email" id="email" required></div>
+
+  <!-- A div pretending to be a combobox: no <select>, so anything keyed
+       off tag names misses it entirely. The accessibility tree still
+       reports role=combobox, which is why perception reads that instead. -->
+  <div>
+    <span id="country-label">Country</span>
+    <div role="combobox" aria-labelledby="country-label" aria-expanded="false"
+         tabindex="0" id="country">Select a country</div>
+  </div>
+
+  <!-- Date entry as three linked inputs rather than <input type=date>. -->
+  <fieldset>
+    <legend>Earliest start date</legend>
+    <label>Day <input id="start_day" inputmode="numeric" maxlength="2"></label>
+    <label>Month <input id="start_month" inputmode="numeric" maxlength="2"></label>
+    <label>Year <input id="start_year" inputmode="numeric" maxlength="4"></label>
+  </fieldset>
+
+  <!-- Autocomplete with a listbox popup. -->
+  <div>
+    <label for="school">University</label>
+    <input id="school" role="combobox" aria-autocomplete="list" aria-controls="school-list">
+    <ul id="school-list" role="listbox" hidden><li role="option">Example University</li></ul>
+  </div>
+
+  <!-- International formatting: a phone field with a separate dial code. -->
+  <div>
+    <label for="dial">Country code</label>
+    <input id="dial" value="+91" size="4">
+    <label for="mobile">Mobile number</label>
+    <input id="mobile" inputmode="tel">
+  </div>
+
+  <button type="submit" id="submit">Submit Application</button>
+</form>
+</body></html>

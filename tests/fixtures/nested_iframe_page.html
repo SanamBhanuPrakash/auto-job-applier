@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Careers — Acme</title></head>
+<body>
+  <h1>Careers at Acme</h1>
+  <p>Our application form is hosted by our ATS provider.</p>
+  <!-- Two levels deep: the branded careers page embeds a wrapper, which
+       embeds the ATS form. Code that only looks one frame down finds the
+       wrapper and reports "no form". -->
+  <iframe id="wrapper" src="./iframe_wrapper.html" width="800" height="600"></iframe>
+</body></html>
