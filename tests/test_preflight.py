@@ -55,3 +55,23 @@ def test_review_mode_is_the_reported_default(monkeypatch):
     check = next(c for c in run_preflight() if c.name == "submission mode")
     assert check.status is Status.OK
     assert "waits for you" in check.detail
+
+
+def test_profile_check_passes_for_a_correctly_filled_in_profile(monkeypatch):
+    """Regression test: the Profile schema (jobbot/resume/schema.py) and
+    every profile.yaml this project generates call the field "name", not
+    "full_name" — checking the wrong key here meant this FAILed even for a
+    profile.yaml that matched config/profile.example.yaml exactly."""
+    from jobbot import config as config_module
+    from jobbot import preflight
+
+    # _check_profile() does `from jobbot.config import load_profile_raw`
+    # inside the function body, so patching the source attribute is what
+    # a fresh call actually picks up.
+    monkeypatch.setattr(config_module, "load_profile_raw", lambda: {"name": "Ada Lovelace", "email": "ada@example.com"})
+
+    check = preflight._check_profile()
+
+    assert check.status is Status.OK
+    assert "Ada Lovelace" in check.detail
+    assert "ada@example.com" in check.detail

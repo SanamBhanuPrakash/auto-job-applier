@@ -38,13 +38,18 @@ def _check_profile() -> Check:
     except Exception as exc:  # noqa: BLE001
         return Check("candidate profile", Status.FAIL, f"could not load: {exc}",
                      "copy config/profile.example.yaml to config/profile.yaml and fill it in")
-    missing = [k for k in ("full_name", "email") if not raw.get(k)]
+    # jobbot/resume/schema.py's Profile model (and every file this project
+    # generates via `jobbot resume import`) calls this field "name", not
+    # "full_name" — confirmed live: checking "full_name" here meant this
+    # FAILed for every correctly-filled-in profile.yaml, including one that
+    # matched config/profile.example.yaml exactly.
+    missing = [k for k in ("name", "email") if not raw.get(k)]
     if missing:
         return Check("candidate profile", Status.FAIL,
                      f"missing required field(s): {', '.join(missing)}",
                      "edit config/profile.yaml")
     return Check("candidate profile", Status.OK,
-                 f"{raw.get('full_name')} <{raw.get('email')}>")
+                 f"{raw.get('name')} <{raw.get('email')}>")
 
 
 def _check_resume() -> Check:
