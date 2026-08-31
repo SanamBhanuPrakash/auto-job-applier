@@ -21,6 +21,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from jobbot.db import session_scope
+from jobbot.llm import DailyQuotaExceeded
 from jobbot.models import ResumeProfile
 from jobbot.resume.parser import parse_resume
 
@@ -35,14 +36,29 @@ def tag_from_filename(path: Path) -> str:
 
 def import_folder(folder: Path) -> list[str]:
     """Parses every resume file in `folder` (non-recursive) and upserts a
-    ResumeProfile per file. Returns the tags imported, in filename order."""
+    ResumeProfile per file. Returns the tags imported, in filename order.
+
+    A single resume that fails to parse — confirmed live: the model's
+    tool-call generation kept coming back malformed/empty even after
+    llm.py's retries were exhausted, on one unusually dense resume — is
+    logged and skipped rather than losing every resume queued behind it in
+    the same folder. Before this, one bad file aborted the whole
+    `import-folder` run and any files after it in sorted order were never
+    even attempted.
+    """
     tags: list[str] = []
     for path in sorted(folder.iterdir()):
         if not path.is_file() or path.suffix.lower() not in RESUME_EXTENSIONS:
             continue
         tag = tag_from_filename(path)
         log.info("Parsing resume %s as profile %r", path.name, tag)
-        profile = parse_resume(path)
+        try:
+            profile = parse_resume(path)
+        except DailyQuotaExceeded:
+            raise  # every remaining resume would fail the same way today — stop, don't waste calls
+        except Exception:  # noqa: BLE001
+            log.exception("Failed to parse %s; skipping (re-run `jobbot resume import-folder` later to retry it)", path.name)
+            continue
 
         with session_scope() as session:
             existing = session.execute(

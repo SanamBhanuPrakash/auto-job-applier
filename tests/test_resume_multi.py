@@ -85,3 +85,46 @@ def test_reimporting_same_filename_updates_in_place(tmp_path, isolated_db, monke
 
 def test_get_profile_returns_none_for_unknown_tag(isolated_db):
     assert multi.get_profile("does-not-exist") is None
+
+
+def test_one_resume_failing_to_parse_does_not_abort_the_rest(tmp_path, isolated_db, monkeypatch):
+    """Real bug hit live: one unusually dense resume exhausted llm.py's
+    retries with a malformed/empty tool-call generation, and the raised
+    exception aborted the whole import-folder run — every resume after it
+    in sorted order was silently never attempted."""
+    for name in ("a-first", "b-fails", "c-third"):
+        (tmp_path / f"{name}.pdf").write_bytes(b"dummy")
+
+    def flaky_parse(path):
+        if path.stem == "b-fails":
+            raise RuntimeError("tool_use_failed even after retries")
+        return _fake_profile(path.stem)
+
+    monkeypatch.setattr(multi, "parse_resume", flaky_parse)
+
+    tags = multi.import_folder(tmp_path)
+
+    assert set(tags) == {"a-first", "c-third"}  # b-fails skipped, not fatal
+    assert multi.get_profile("a-first") is not None
+    assert multi.get_profile("c-third") is not None
+    assert multi.get_profile("b-fails") is None
+
+
+def test_daily_quota_exhaustion_stops_the_whole_import_instead_of_wasting_calls(tmp_path, isolated_db, monkeypatch):
+    from jobbot.llm import DailyQuotaExceeded
+
+    for name in ("a-first", "b-fails", "c-third"):
+        (tmp_path / f"{name}.pdf").write_bytes(b"dummy")
+
+    calls = {"n": 0}
+
+    def always_quota(path):
+        calls["n"] += 1
+        raise DailyQuotaExceeded("daily quota exhausted for today")
+
+    monkeypatch.setattr(multi, "parse_resume", always_quota)
+
+    with pytest.raises(DailyQuotaExceeded):
+        multi.import_folder(tmp_path)
+
+    assert calls["n"] == 1  # stopped immediately on the first resume, didn't burn through the rest

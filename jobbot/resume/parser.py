@@ -90,12 +90,16 @@ def parse_resume(path: Path) -> Profile:
         tool_name="record_profile",
         tool_description="Record the structured facts extracted from the resume.",
         input_schema=_PROFILE_TOOL_SCHEMA,
-        # A resume's worth of structured output rarely needs more than this;
-        # the default (4096) was needlessly reserving most of a minute's
-        # worth of Groq's free-tier TPM budget per call, observed live as
-        # near-constant 429s importing 9 resumes back to back (each one
-        # recovered via the retry-with-backoff in llm.py, just slower than
-        # it needed to be).
-        max_tokens=2048,
+        # 2048 was chosen to ease TPM pressure (see below), but a genuinely
+        # dense resume — long skill lists, several detailed roles — can
+        # need more than that to finish; confirmed live: several imports hit
+        # Groq's 'tool_use_failed' 400 with generation visibly cut off
+        # mid-array at the 2048 ceiling, burning a retry (itself more TPM
+        # spend) rather than succeeding on the first attempt. 3072 covers
+        # what was observed without reverting all the way to the old
+        # default (4096), which was needlessly reserving most of a minute's
+        # worth of Groq's free-tier TPM budget per call for an average-length
+        # resume.
+        max_tokens=3072,
     )
     return Profile.model_validate(result)
