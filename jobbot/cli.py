@@ -675,6 +675,22 @@ def doctor() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def dashboard(
+    min_score: float = typer.Option(60, help="Only show queued jobs at or above this fit score"),
+    limit: int = typer.Option(30, help="How many queued jobs to list"),
+    port: int = typer.Option(8787),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open a browser tab"),
+) -> None:
+    """Live local web page: what's open right now, what's queued next, what's
+    already gone out. Read-only — run `jobbot run`/`batch`/`apply-all` in
+    another terminal as usual; this just gives you something better than
+    scrolling logs to watch while you click Submit in the windows they open."""
+    from jobbot.dashboard import serve
+
+    serve(min_score=min_score, limit=limit, port=port, open_browser=not no_browser)
+
+
 @app.command(name="eval")
 def run_eval(
     only: str = typer.Option("", help="Run one scenario or one category (e.g. 'safety')"),
