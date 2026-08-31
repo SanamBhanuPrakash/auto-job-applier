@@ -12,6 +12,7 @@ its next tick without any cross-thread Playwright calls.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -100,6 +101,47 @@ def test_submit_button_disappearing_in_place_is_detected_as_submitted(browser, i
     status = review_module.wait_for_submit_or_close(page, page, _FakeAtsModule(), _job(), [_name_field()], poll_interval_s=0.1)
 
     assert status == "submitted"
+    page.close()
+
+
+def test_submit_button_not_yet_rendered_is_not_mistaken_for_an_instant_submit(browser, isolated_db):
+    """Real bug hit live: checking 'the submit button is absent' without
+    first confirming it was ever present meant a button that simply hadn't
+    finished rendering yet on the very first poll tick looked exactly like
+    an already-completed submit — closing the window and opening the next
+    job's within seconds, with nothing actually reviewed or clicked
+    (reported live as "the tabs are opening and closing"). The button here
+    is absent at first, appears after 300ms, and only then genuinely
+    disappears at 600ms — the real submitted signal."""
+    page = browser.new_page()
+    page.set_content("""
+    <!doctype html><html><body>
+    <form><input id="name" data-jobbot-id="1" value=""></form>
+    </body></html>
+    """)
+    page.evaluate("""
+        setTimeout(() => {
+            const b = document.createElement('button');
+            b.id = 'submit-btn';
+            document.body.appendChild(b);
+        }, 300);
+        setTimeout(() => {
+            const b = document.getElementById('submit-btn');
+            if (b) b.remove();
+        }, 600);
+    """)
+
+    start = time.monotonic()
+    status = review_module.wait_for_submit_or_close(
+        page, page, _FakeAtsModule(), _job(), [_name_field()], poll_interval_s=0.1,
+    )
+    elapsed = time.monotonic() - start
+
+    assert status == "submitted"
+    assert elapsed >= 0.5, (
+        f"returned after only {elapsed:.2f}s — treated the button's absence before it "
+        f"ever rendered as an instant submit"
+    )
     page.close()
 
 

@@ -86,6 +86,17 @@ def wait_for_submit_or_close(
     confirmed — see jobbot/learning/provenance.py.
     """
     original_url = form_ctx.url
+    try:
+        # "the submit button disappeared" only means something if it was
+        # actually there to begin with. Confirmed live: checking count() ==
+        # 0 unconditionally meant a form whose submit button hadn't finished
+        # rendering yet (or whose selector just doesn't match that
+        # employer's variant of the page) looked "already submitted" on the
+        # very first poll tick — closing the window and opening the next
+        # job's within seconds, with nothing actually reviewed or clicked.
+        submit_was_present = form_ctx.locator(ats_module.SUBMIT_SELECTOR).count() > 0
+    except Exception:  # noqa: BLE001
+        submit_was_present = False
     console.print(
         f"\n[bold yellow]Waiting for you in the browser[/bold yellow] — fill in anything listed above for "
         f"[bold]{job.title} @ {job.company}[/bold] and click Submit yourself on the page; I'll notice and move "
@@ -96,9 +107,11 @@ def wait_for_submit_or_close(
             return "skipped"
         try:
             navigated = form_ctx.url != original_url
-            submit_gone = form_ctx.locator(ats_module.SUBMIT_SELECTOR).count() == 0
+            submit_gone = submit_was_present and form_ctx.locator(ats_module.SUBMIT_SELECTOR).count() == 0
             if navigated or submit_gone:
                 return "submitted"
+            if not submit_was_present:
+                submit_was_present = form_ctx.locator(ats_module.SUBMIT_SELECTOR).count() > 0
             with session_scope() as session:
                 learning_store.capture_from_page(
                     session, form_ctx, fields,
