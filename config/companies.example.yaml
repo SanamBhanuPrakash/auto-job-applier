@@ -67,6 +67,22 @@ greenhouse:
   # Confirmed live: substantial India-based hiring specifically.
   - highradius
   - phonepe
+  # Added in a later pass, same live-verification standard — checked
+  # against the real API immediately before being added, current job count
+  # noted so a later re-check can tell "went quiet" from "slug rotted".
+  - anthropic    # 571 jobs at verification time
+  - scaleai      # 217
+  - webflow      # 27
+  - netlify      # 2
+  - faire        # 66
+  - affirm       # 210
+  - roblox       # 234
+  - duolingo     # 83
+  - calendly     # 12
+  - flexport     # 167
+  - samsara      # 248
+  - carta        # 59
+  - checkr       # 46
 
 lever:
   - plaid
@@ -84,6 +100,13 @@ ashby:
   - openai
   - perplexity
   - runway
+  # Added in a later pass, live-verified same as above.
+  - watershed    # 32 jobs at verification time
+  - posthog      # 13
+  - replit       # 71
+  - cursor       # 121
+  - hex          # 28
+  - warp         # 19
 
 # Discovery-only for all three below — see README "Extending to more ATSes
 # / sites" for why submission isn't implemented for each (SmartRecruiters'
