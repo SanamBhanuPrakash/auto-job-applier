@@ -91,8 +91,20 @@ def run(
     console.print(f"[green]Discovered {inserted} new job(s)[/green], {skipped} already known.")
 
     console.rule("[bold]2/3 — match[/bold]")
-    n = _do_match(top_n)
-    console.print("Nothing new to score this run." if n == 0 else f"[green]Scored {n} job(s).[/green]")
+    from jobbot.llm import DailyQuotaExceeded
+
+    try:
+        n = _do_match(top_n)
+        console.print("Nothing new to score this run." if n == 0 else f"[green]Scored {n} job(s).[/green]")
+    except DailyQuotaExceeded as exc:
+        # Real failure hit live: every configured LLM provider's free-tier
+        # daily quota ran out mid-run, and this used to crash the whole
+        # `run` command — including the apply phase, which doesn't need any
+        # LLM calls for jobs that were already scored on an earlier day.
+        # Losing access to today's *new* scoring is not a reason to also
+        # block reviewing/applying to whatever already cleared the bar.
+        console.print(f"[yellow]Matching stopped: {exc}[/yellow]")
+        console.print("[yellow]Continuing to apply with whatever's already scored.[/yellow]")
 
     console.rule("[bold]3/3 — apply[/bold]")
     batch(min_score=min_score, limit=limit, auto_submit=auto_submit, autofill_sensitive=autofill_sensitive)
