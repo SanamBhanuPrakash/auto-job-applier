@@ -74,6 +74,47 @@ def test_no_match_for_unrelated_question(session):
     assert match is None
 
 
+def test_fuzzy_match_does_not_cross_countries_on_work_authorization(session):
+    """Real bug hit live: 'Are you legally authorized to work in the United
+    States?' vs '...in India?' scores 92.5 on token_set_ratio (they share 7
+    of 8 words), and 'in India?' vs 'the right to work in the UK/EU?'
+    scores 91.4 — both clear the fuzzy threshold. Reusing an India answer
+    for a UK/EU question (or vice versa) is a wrong sensitive answer, not a
+    convenience — this must return None, not the wrong country's answer."""
+    store.upsert(
+        session, "Are you legally authorized to work in India?", "radio", "Yes", sensitive=True,
+    )
+    session.commit()
+
+    assert store.find_match(session, "Do you have the right to work in the UK/EU?", "radio") is None
+    assert store.find_match(session, "Are you legally authorized to work in the United States?", "radio") is None
+
+
+def test_fuzzy_match_still_works_within_the_same_country(session):
+    """The region guard must not break the exact scenario it sits next to —
+    same-country rewordings still need to match."""
+    store.upsert(
+        session, "Are you legally authorized to work in the United States?", "radio", "Yes", sensitive=True,
+    )
+    session.commit()
+
+    match = store.find_match(session, "Are you legally eligible to work in the United States?", "radio")
+    assert match is not None
+    assert match.value == "Yes"
+
+
+def test_fuzzy_match_still_works_when_neither_side_names_a_region(session):
+    """The guard only applies when both labels actually name a region —
+    ordinary reworded questions with no country/region word at all must be
+    unaffected (same case as the pre-existing reworded-question test)."""
+    store.upsert(session, "Desired annual salary", "text", "150000", sensitive=False)
+    session.commit()
+
+    match = store.find_match(session, "Annual salary desired", "text")
+    assert match is not None
+    assert match.value == "150000"
+
+
 def test_match_fields_only_matches_known_fields(session):
     store.upsert(session, "First name", "text", "Jane", sensitive=False)
     session.commit()

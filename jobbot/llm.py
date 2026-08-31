@@ -133,9 +133,23 @@ def _is_daily_quota_error(exc: BaseException) -> bool:
     confusing stack trace. Detected by the wording Groq's own error message
     uses ("tokens per day" / "requests per day"), so it fails fast instead
     with a clear, actionable message.
+
+    Gemini's free tier has the same failure shape, confirmed live during
+    the Groq-to-Gemini fallback this module implements: `gemini-3.7-flash`
+    capped at a mere 20 requests/day and the quota id in its 429 body reads
+    "GenerateRequestsPerDayPerProjectPerModel-FreeTier" — "PerDay" with no
+    surrounding space, which the original "per day" substring check missed
+    entirely. That meant every remaining batch in a run retried the full
+    backoff ladder against a quota that would not clear for a full day
+    (confirmed live: ~250 batches each burning up to ~60s of retries scoring
+    a 1200-job run, rather than failing the whole run fast the way a Groq
+    daily-quota hit already does).
     """
     message = str(exc).lower()
-    return "per day" in message or "tpd" in message or "rpd" in message
+    return (
+        "per day" in message or "perday" in message
+        or "tpd" in message or "rpd" in message
+    )
 
 
 def _is_malformed_tool_call_error(exc: BaseException) -> bool:

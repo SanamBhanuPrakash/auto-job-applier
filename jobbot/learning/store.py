@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 
 from rapidfuzz import fuzz
 from sqlalchemy import select
@@ -20,6 +21,28 @@ from jobbot.submit.form_scan import FieldSpec, FrameLike
 log = logging.getLogger(__name__)
 
 FUZZY_MATCH_THRESHOLD = 90
+
+# Confirmed live: "Are you legally authorized to work in the United
+# States?" vs "...in India?" scores 92.5 on token_set_ratio — the two
+# country-scoped onboarding questions differ only by one word out of eight,
+# and a bag-of-words scorer doesn't know that word is the one that matters.
+# "...in India?" vs "Do you have the right to work in the UK/EU?" scores
+# 91.4 the same way. Both clear FUZZY_MATCH_THRESHOLD, meaning a fuzzy
+# lookup could silently answer a UK/EU work-authorization question with
+# whatever was saved for India (or vice versa) — exactly the
+# wrong-sensitive-answer failure this whole matching system exists to
+# prevent, just laundered through the fuzzy fallback path instead of an
+# LLM guess. When both labels name a region and the regions disagree, no
+# score is high enough to treat one as a substitute for the other.
+_REGION_PATTERNS: dict[str, re.Pattern] = {
+    "india": re.compile(r"\b(?:india|indian)\b"),
+    "us": re.compile(r"\b(?:united states|usa|us|america)\b"),
+    "uk_eu": re.compile(r"\b(?:united kingdom|uk|britain|european union|eu)\b"),
+}
+
+
+def _region_signals(normalized_key: str) -> frozenset[str]:
+    return frozenset(name for name, pattern in _REGION_PATTERNS.items() if pattern.search(normalized_key))
 MAX_LEARNABLE_VALUE_LEN = 500
 # Long free-text answers (cover letters, "why do you want to work here")
 # are company-specific — reusing them verbatim elsewhere reads as spam and
@@ -55,9 +78,13 @@ def _fuzzy_find(session: Session, model, label: str):
     if exact is not None:
         return exact
 
+    query_regions = _region_signals(key)
     best = None
     best_score = 0.0
     for candidate in session.execute(select(model)).scalars():
+        candidate_regions = _region_signals(candidate.question_key)
+        if query_regions and candidate_regions and query_regions.isdisjoint(candidate_regions):
+            continue  # different named country/region — never an acceptable substitute regardless of score
         score = fuzz.token_set_ratio(key, candidate.question_key)
         if score > best_score:
             best_score = score

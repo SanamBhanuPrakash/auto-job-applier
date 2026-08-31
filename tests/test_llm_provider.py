@@ -102,6 +102,36 @@ def test_daily_quota_error_fails_fast_with_clear_message_no_retry(monkeypatch):
     assert calls["n"] == 1  # no wasted retries on something that won't clear in seconds
 
 
+def test_gemini_daily_quota_wording_is_also_detected_fast(monkeypatch):
+    """Real error hit live falling back to Gemini after Groq's daily quota
+    ran out: gemini-3.7-flash's free tier caps at 20 requests/day, and its
+    429 body's quotaId reads 'GenerateRequestsPerDayPerProjectPerModel-
+    FreeTier' — 'PerDay' with no space, which the original 'per day'
+    substring check missed. That meant it retried the full backoff ladder
+    on every remaining batch instead of failing the whole run fast."""
+    calls = {"n": 0}
+
+    class FakeGeminiClientError(Exception):
+        def __init__(self):
+            self.code = 429
+            super().__init__(
+                "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your "
+                "current quota', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'quotaId': "
+                "'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaValue': '20'}]}}"
+            )
+
+    def always_daily_quota():
+        calls["n"] += 1
+        raise FakeGeminiClientError()
+
+    monkeypatch.setattr(llm_module.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(llm_module.DailyQuotaExceeded):
+        llm_module._call_with_rate_limit_retry(always_daily_quota)
+
+    assert calls["n"] == 1  # no wasted retries
+
+
 def test_per_minute_rate_limit_still_retries_as_normal(monkeypatch):
     """Sanity check the daily-quota detection doesn't accidentally swallow
     the ordinary per-minute case this was already handling correctly."""

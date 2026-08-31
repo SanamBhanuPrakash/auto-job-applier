@@ -11,16 +11,20 @@ The important tests are the two halves of that claim:
 from __future__ import annotations
 
 import os
+import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError, sync_playwright
-from sqlalchemy import select
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+import jobbot.db as db_module
 from jobbot.db import session_scope
 from jobbot.learning import store as learning_store
 from jobbot.learning.provenance import Provenance, may_autofill_sensitive
-from jobbot.models import LearnedAnswer
+from jobbot.models import Base
 from jobbot.onboarding import (
     CATALOGUE,
     Region,
@@ -38,16 +42,43 @@ _CHROME = os.environ.get("JOBBOT_TEST_CHROMIUM_PATH") or None
 
 
 @pytest.fixture(autouse=True)
-def clean_answers():
-    def _wipe():
-        with session_scope() as s:
-            for row in s.execute(select(LearnedAnswer)).scalars().all():
-                s.delete(row)
-            s.commit()
+def clean_answers(monkeypatch):
+    """Every test here writes real answers through save_answer()/
+    learning_store — an in-memory DB per test, not a wipe of whatever
+    database happens to be configured. The previous version of this
+    fixture called the real session_scope() directly and deleted every
+    LearnedAnswer row before AND after each test — confirmed live: run
+    against a real profile with `jobbot setup` already completed, it
+    silently erases those answers (this is what happened running the full
+    suite locally after answering onboarding questions for real).
 
-    _wipe()
+    onboarding.py's save_answer()/answered_keys() do a *local* `from
+    jobbot.db import session_scope` inside each function body, so patching
+    the attribute on jobbot.db is what they actually pick up on the next
+    call. This file also imports session_scope directly at module level
+    (used in several tests below), which needs patching separately since
+    that import already bound the real function by the time any fixture
+    runs.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+    @contextmanager
+    def fake_session_scope():
+        session = Session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    monkeypatch.setattr(db_module, "session_scope", fake_session_scope)
+    monkeypatch.setattr(sys.modules[__name__], "session_scope", fake_session_scope)
     yield
-    _wipe()
 
 
 @pytest.fixture(scope="module")
