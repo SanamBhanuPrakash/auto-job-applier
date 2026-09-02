@@ -54,6 +54,42 @@ part that gets people banned.
    actually fits each posting instead of using one resume for everything.
    See "Multiple resumes" below.
 
+## Indeed (via the official MCP connector)
+
+If you have connected Indeed's MCP connector, `jobbot indeed-import` brings
+its results into the same pipeline as every other source:
+
+```bash
+jobbot indeed-import indeed_results.md --posted-within-days 30
+```
+
+Three things about it are worth knowing up front, all verified against the
+live connector rather than assumed:
+
+- **It cannot apply.** The connector offers search, job details, company
+  data and resume. There is no apply tool, and no employer application URL
+  in its output — every link is a `to.indeed.com` click-tracking redirect.
+  So nothing imported from Indeed is auto-applied.
+- **Its job ids are positional.** `JOBSEARCH_3` means "the third result of
+  the search I just ran", not "this job" — asking for details on the same
+  id twice returned two different apply URLs. jobbot therefore identifies
+  Indeed postings by a content fingerprint (company + title + location +
+  date), because using the supplied id would let tomorrow's search collide
+  with today's and break the duplicate-application guarantee.
+- **Its results need filtering.** One live search for "Python Developer" in
+  Bengaluru returned ten results, all ten from one advertiser posting
+  part-time gig work, four months stale. Per-company caps, a gig-work
+  filter and the recency window are on by default.
+
+What it is genuinely good for is **finding employers you did not know
+about**. After importing, jobbot probes each new company for a
+Greenhouse/Lever/Ashby board and prints the slug to paste into
+`config/companies.yaml`. Once it is there, the real posting arrives through
+that connector with a stable, appliable URL and `jobbot run` applies to it
+automatically. (That is how `bounteous` got into the example config — an
+Indeed search surfaced it, the probe found a Lever board with 36 open
+roles.)
+
 ## What this deliberately does NOT do
 
 - **No LinkedIn or Indeed automation.** Both explicitly prohibit this in

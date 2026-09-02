@@ -720,6 +720,147 @@ def run_eval(
         raise typer.Exit(code=1)
 
 
+@app.command(name="indeed-import")
+def indeed_import(
+    path: Path = typer.Argument(..., help="File of Indeed results (markdown or JSON)"),
+    posted_within_days: int = typer.Option(30, help="Drop postings older than this"),
+    include_gig_work: bool = typer.Option(
+        False, help="Keep 'AI Trainer'/annotation gig listings (filtered out by default)"),
+    probe_boards: bool = typer.Option(
+        True, help="Check whether new companies have a Greenhouse/Lever/Ashby board"),
+) -> None:
+    """Import jobs discovered through the Indeed MCP connector.
+
+    Indeed's connector offers search, job details, company data and resume
+    — there is no apply tool, and no employer application URL in its
+    output, so nothing imported here can be submitted automatically. What
+    it is genuinely good for is surfacing companies and roles you did not
+    already know about: when one of them has a Greenhouse/Lever/Ashby
+    board, add it to config/companies.yaml and the real posting comes in
+    through that connector with a stable, appliable URL.
+
+    Identity is a content fingerprint over company/title/location/date.
+    Indeed's own job ids are positional ("JOBSEARCH_3" means "the third
+    result"), so using them would let tomorrow's search collide with
+    today's and break the duplicate-application guarantee.
+    """
+    import json as _json
+
+    from jobbot.discovery.indeed import (
+        companies_worth_adding, normalize, parse_mcp_markdown,
+    )
+    from jobbot.discovery.aggregate import persist_jobs
+
+    if not path.exists():
+        console.print(f"[red]{path} does not exist[/red]")
+        raise typer.Exit(code=1)
+
+    text = path.read_text(encoding="utf-8")
+    try:
+        payload = _json.loads(text)
+        records = payload if isinstance(payload, list) else payload.get("results", [])
+    except _json.JSONDecodeError:
+        records = parse_mcp_markdown(text)
+
+    if not records:
+        console.print("[yellow]No job records found in that file.[/yellow]")
+        raise typer.Exit(code=1)
+
+    jobs = normalize(records, posted_within_days=posted_within_days,
+                     drop_gig_work=not include_gig_work)
+    console.print(f"Parsed {len(records)} record(s); kept {len(jobs)} after "
+                  "de-duplication, per-company caps and filtering.")
+    if not jobs:
+        return
+
+    inserted, already_known = persist_jobs(jobs)
+    console.print(f"[green]{inserted} new job(s)[/green] stored "
+                  f"({already_known} already known).")
+
+    table = Table(title="Imported from Indeed — apply by hand, or add the board below")
+    table.add_column("company")
+    table.add_column("title", overflow="fold")
+    table.add_column("posted")
+    table.add_column("link", overflow="fold")
+    for j in jobs[:20]:
+        table.add_row(j.company, j.title, j.posted_at or "-", j.url)
+    console.print(table)
+
+    suggestions = companies_worth_adding(jobs, _configured_company_names())
+    if not suggestions:
+        console.print("\n[yellow]Note:[/yellow] Indeed supplies no employer application "
+                      "URL and no apply API, so these are not auto-applied.")
+        return
+
+    if not probe_boards:
+        console.print("\n[bold]Companies not yet in config/companies.yaml:[/bold]")
+        for name in suggestions[:15]:
+            console.print(f"  • {name}")
+        return
+
+    from jobbot.discovery.ats_probe import probe_all
+
+    console.print(f"\nChecking {len(suggestions)} new company(s) for a board we can "
+                  "apply through...")
+    found = probe_all(suggestions)
+
+    if found:
+        board_table = Table(title="Boards found — add these to config/companies.yaml")
+        board_table.add_column("company")
+        board_table.add_column("ats")
+        board_table.add_column("slug")
+        board_table.add_column("open roles", justify="right")
+        for f in found:
+            board_table.add_row(f["company"], f["ats"], f["slug"], str(f["open_roles"]))
+        console.print(board_table)
+        console.print("\n[bold]Paste into config/companies.yaml:[/bold]")
+        by_ats: dict[str, list[str]] = {}
+        for f in found:
+            by_ats.setdefault(f["ats"], []).append(f["slug"])
+        for ats, slugs in sorted(by_ats.items()):
+            console.print(f"  {ats}:")
+            for slug in slugs:
+                console.print(f"    - {slug}")
+        console.print("\nThen [bold]jobbot discover[/bold] pulls those postings with real "
+                      "application URLs, and [bold]jobbot run[/bold] applies to them "
+                      "automatically.")
+    else:
+        console.print("[dim]No Greenhouse/Lever/Ashby board found for any of them.[/dim]")
+
+    no_board = [n for n in suggestions if n not in {f["company"] for f in found}]
+    if no_board:
+        console.print(f"\n[dim]Apply by hand (no board found, or a slug we could not "
+                      f"guess): {', '.join(no_board[:10])}[/dim]")
+
+    console.print("\n[yellow]Note:[/yellow] Indeed itself supplies no employer application "
+                  "URL and no apply API, so nothing imported here is auto-applied. The "
+                  "boards above are how these become automatic.")
+
+
+def _configured_company_names() -> set[str]:
+    """Every company slug already in config/companies.yaml, across ATSes.
+
+    Slugs are not display names ("acme-labs" vs "Acme Labs"), so this is a
+    best-effort comparison — suggesting a company already configured is a
+    harmless nuisance, missing one is the thing worth avoiding.
+    """
+    from jobbot.config import load_companies
+
+    names: set[str] = set()
+    try:
+        companies = load_companies() or {}
+    except Exception:  # noqa: BLE001 - suggestions are a nicety, not a requirement
+        return names
+    for group in companies.values():
+        if isinstance(group, dict):
+            group = list(group.keys()) + list(group.values())
+        if isinstance(group, (list, tuple)):
+            for entry in group:
+                if isinstance(entry, str):
+                    names.add(entry.replace("-", " ").replace("_", " "))
+    return names
+
+
 @app.command()
 def setup(
     region: str = typer.Option(

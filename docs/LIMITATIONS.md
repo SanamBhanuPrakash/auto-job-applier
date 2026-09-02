@@ -17,10 +17,30 @@ partly that doing it properly means a real candidate applying to a real
 job. Until that happens, "it works" means "the logic behaves correctly on
 the failure shapes we can reproduce", which is a weaker claim.
 
+## Indeed: discovery yes, applying no
+
+Indeed's official MCP connector is a sanctioned first-party API, so
+reading it is a different thing from scraping indeed.com — and
+`jobbot indeed-import` uses it for discovery. But it **cannot apply**, and
+this is a property of the connector, not a choice:
+
+- it exposes search, job details, company data and resume — there is no
+  apply tool;
+- its output carries no employer application URL, only per-call
+  `to.indeed.com` tracking redirects (which 403 a non-browser client);
+- its job ids are positional (`JOBSEARCH_3` = "third result"), so they
+  cannot be used for identity — jobbot fingerprints on content instead.
+
+"Easily apply" postings hosted on Indeed therefore cannot be automated
+here at all, and driving indeed.com with a browser remains out of scope.
+What Indeed contributes is reach: it surfaces employers you did not know
+about, and the board probe converts the ones with a Greenhouse/Lever/Ashby
+board into postings the engine can apply to normally.
+
 ## Job boards this deliberately does not automate
 
-LinkedIn, Indeed, Naukri and Wellfound submission is **not** implemented
-and will not be. Their terms prohibit automated access; *hiQ v. LinkedIn*
+LinkedIn, Naukri and Wellfound submission is **not** implemented
+and will not be. Neither is Indeed submission (see above). Their terms prohibit automated access; *hiQ v. LinkedIn*
 ended in a $500K judgment; and the creator of a well-known auto-apply tool
 had their own account restricted. The realistic outcome of building it is
 the user losing the account they need most.

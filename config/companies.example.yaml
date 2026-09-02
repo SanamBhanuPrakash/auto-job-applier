@@ -91,6 +91,11 @@ lever:
   - cred
   - meesho
   - zeta
+  # Surfaced by an Indeed search, then confirmed live: 36 open postings.
+  # This is the loop `jobbot indeed-import` exists for — Indeed found the
+  # company, the board probe found the slug, and the postings now arrive
+  # with real jobs.lever.co URLs the submission engine can apply to.
+  - bounteous
 
 ashby:
   - linear
