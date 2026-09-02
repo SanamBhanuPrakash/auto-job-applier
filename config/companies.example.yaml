@@ -84,6 +84,19 @@ greenhouse:
   - carta        # 59
   - checkr       # 46
 
+  # --- India: probed live against each board's public API and confirmed to
+  # have open roles. These are the entries that make Indian postings
+  # *auto-appliable* rather than merely visible — Greenhouse and Lever are
+  # the two ATSes jobbot/submit/ has a submission handler for.
+  - postman            # 66 open
+  - highradius         # 84 open
+  - druva              # 43 open
+  - sigmoid            # 32 open
+  - turing             # 26 open
+  - slice              # 27 open
+  - observeai          # 18 open
+  - groww              # 5 open
+
 lever:
   - plaid
   - lever
@@ -96,6 +109,11 @@ lever:
   # company, the board probe found the slug, and the postings now arrive
   # with real jobs.lever.co URLs the submission engine can apply to.
   - bounteous
+
+  # --- India, probed live (see the Greenhouse block above).
+  - paytm              # 202 open
+  - porter             # 28 open
+  - mindtickle         # 17 open
 
 ashby:
   - linear
@@ -112,6 +130,12 @@ ashby:
   - cursor       # 121
   - hex          # 28
   - warp         # 19
+
+  # --- India, probed live. NOTE: Ashby postings are discovered and scored
+  # but NOT yet auto-submittable — there is no Ashby submission handler.
+  - navi               # 9 open
+  - skyflow            # 9 open
+  - atlan              # 5 open
 
 # Discovery-only for all three below — see README "Extending to more ATSes
 # / sites" for why submission isn't implemented for each (SmartRecruiters'

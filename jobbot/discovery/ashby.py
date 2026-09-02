@@ -47,7 +47,10 @@ def fetch_jobs(company_slug: str, client: httpx.Client | None = None) -> list[No
                 remote=bool(item.get("isRemote")) or "remote" in location.lower(),
                 description=strip_html(item.get("descriptionPlain", "") or item.get("description", "") or ""),
                 posted_at=item.get("publishedAt", ""),
-                ats="",  # Ashby forms not yet implemented for auto-submit
+                # Ashby now has a submission handler (jobbot/submit/ashby.py).
+                # Its apply form is a React SPA at <jobUrl>/application, which
+                # is why that module waits for hydration and rewrites the URL.
+                ats="ashby",
                 raw=item,
             )
         )

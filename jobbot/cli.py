@@ -720,6 +720,177 @@ def run_eval(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def assist(
+    url: str = typer.Argument(..., help="Any job application URL — any site, any ATS"),
+    job_id: int = typer.Option(None, help="Link this to a discovered job, for the ledger"),
+    no_llm: bool = typer.Option(False, "--no-llm", help="Fill only from profile + saved answers"),
+) -> None:
+    """Open a posting, fill everything fillable, and hand the browser to you.
+
+    Works on ANY site — Workday, Darwinbox, Keka, Naukri, a company's own
+    careers page — because filling a form is generic. Only *submitting*
+    unattended needs per-ATS code, and in this mode you do that yourself.
+
+    The flow: a browser opens on your saved profile, so a site you already
+    signed into stays signed in. If it wants a login or shows a CAPTCHA,
+    you handle it and press Enter. Then the agent scans the form, fills
+    what it can, and prints what it left for you and why. Nothing is
+    submitted — you review and press Submit.
+    """
+    from pathlib import Path as _Path
+
+    from playwright.sync_api import sync_playwright
+
+    from jobbot.assist import assist as run_assist
+    from jobbot.resume.schema import Profile
+    from jobbot.submit.base import _resolve_profile_and_resume, _user_data_dir
+
+    settings = get_settings()
+    profile, resume_path = None, None
+    job_context = ""
+    if job_id is not None:
+        from jobbot.db import session_scope
+        from jobbot.models import Job
+
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                console.print(f"[red]No job {job_id}[/red]")
+                raise typer.Exit(code=1)
+            profile, resume_path = _resolve_profile_and_resume(job)
+            job_context = f"{job.title} at {job.company}\n\n{(job.description or '')[:800]}"
+            url = url or job.url
+    if profile is None:
+        profile = Profile.model_validate(load_profile_raw())
+        resume_path = settings.jobbot_resume_path
+
+    autofill_sensitive = _confirm_sensitive_autofill_if_needed(None)
+
+    with sync_playwright() as pw:
+        context = pw.chromium.launch_persistent_context(
+            str(_user_data_dir()),
+            headless=False,  # you need to see it; that is the whole point
+        )
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            console.print(f"Opening [bold]{url}[/bold] ...")
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            while True:
+                result = run_assist(
+                    page, url, profile, _Path(resume_path) if resume_path else None,
+                    autofill_sensitive=autofill_sensitive,
+                    job_context=job_context, use_llm=not no_llm,
+                )
+                _render_assist(result)
+                if not (result.needs_login or result.blocked or not result.form_found):
+                    break
+                console.print("\n[bold]Do that in the browser window, then press Enter "
+                              "here to retry.[/bold]  (Ctrl-C to give up)")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    return
+
+            console.print(
+                "\n[green]The browser is yours.[/green] Check every field, fill anything "
+                "listed above, then press Submit there. Press Enter here when you are "
+                "done and I will close it."
+            )
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                pass
+        finally:
+            try:
+                context.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _render_assist(result) -> None:
+    if result.blocked:
+        console.print(f"[red]{result.blocked}[/red]")
+    for note in result.notes:
+        console.print(f"[yellow]{note}[/yellow]")
+    if not result.form_found:
+        return
+
+    console.print(f"\nFound [bold]{result.fields_seen}[/bold] field(s); "
+                  f"filled [green]{len(result.filled)}[/green], "
+                  f"left [yellow]{len(result.left_for_you)}[/yellow] for you "
+                  f"({result.coverage:.0%} coverage)."
+                  + ("  Resume uploaded." if result.resume_uploaded else ""))
+
+    if result.filled:
+        t = Table(title="Filled for you — check these before submitting")
+        t.add_column("field", overflow="fold")
+        t.add_column("value", overflow="fold")
+        for label, value in result.filled[:40]:
+            t.add_row(label, str(value)[:90])
+        console.print(t)
+
+    if result.left_for_you:
+        t = Table(title="Left for you")
+        t.add_column("field", overflow="fold")
+        t.add_column("why", overflow="fold")
+        for label, why in result.left_for_you[:40]:
+            t.add_row(label, why)
+        console.print(t)
+
+
+@app.command(name="india")
+def india(
+    limit: int = typer.Option(40, help="How many to show"),
+    appliable_only: bool = typer.Option(
+        False, help="Only jobs an ATS handler can autofill+submit end to end"),
+) -> None:
+    """List the Indian jobs discovered so far, newest first.
+
+    `jobbot assist <url>` works on every row here regardless of ATS — the
+    `ats` column only tells you which ones `jobbot apply` could also
+    submit unattended.
+    """
+    import re as _re
+
+    from sqlalchemy import select
+
+    from jobbot.db import session_scope
+    from jobbot.models import Job, JobScore
+
+    india_re = _re.compile(
+        r"india|bangalore|bengaluru|hyderabad|mumbai|pune|noida|delhi|gurgaon|"
+        r"gurugram|chennai|kolkata|ahmedabad|jaipur|indore|kochi|coimbatore",
+        _re.IGNORECASE)
+
+    with session_scope() as session:
+        rows = session.execute(
+            select(Job).order_by(Job.discovered_at.desc())
+        ).scalars().all()
+        scores = {s.job_id: s.score for s in
+                  session.execute(select(JobScore)).scalars().all()}
+        rows = [j for j in rows if india_re.search(j.location or "")]
+        if appliable_only:
+            rows = [j for j in rows if (j.ats or "") in ("greenhouse", "lever", "ashby")]
+        shown = rows[:limit]
+        table = Table(title=f"Indian jobs — {len(rows)} found, showing {len(shown)}")
+        table.add_column("id", justify="right")
+        table.add_column("company")
+        table.add_column("title", overflow="fold")
+        table.add_column("location")
+        table.add_column("ats")
+        table.add_column("score", justify="right")
+        for j in shown:
+            score = scores.get(j.id)
+            table.add_row(str(j.id), j.company, j.title, j.location or "-",
+                          j.ats or "[dim]—[/dim]", str(score) if score else "-")
+        console.print(table)
+
+    console.print("\n[bold]jobbot assist <url>[/bold] fills any of these. "
+                  "[bold]jobbot show <id>[/bold] prints a job's URL.")
+
+
 @app.command(name="indeed-import")
 def indeed_import(
     path: Path = typer.Argument(..., help="File of Indeed results (markdown or JSON)"),

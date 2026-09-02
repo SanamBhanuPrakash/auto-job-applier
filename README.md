@@ -201,6 +201,36 @@ not per-resume — with multiple resumes spanning different domains
 per-resume matching happens, so keep it broad rather than narrowly backend-
 specific if you're relying on `config/resumes/`.
 
+## Assisted apply — works on any site
+
+The mode most people actually want. `jobbot apply` runs unattended but
+needs a submission handler written per ATS (Greenhouse, Lever, Ashby), so
+it reaches almost no Indian posting. **Assisted mode inverts that:**
+
+```bash
+jobbot india                 # what has been found, newest first
+jobbot show 8836             # get a job's URL
+jobbot assist <url>          # fills it; you review and press Submit
+```
+
+| you | the agent |
+|---|---|
+| open the posting, sign in if asked, review, press **Submit** | finds the form, fills everything it honestly can, explains the rest |
+
+Because *filling* is generic — it reads the accessibility tree, not an ATS
+template — this works on Workday, Darwinbox, Keka, Naukri, or a company's
+own careers page. Only *submitting unattended* ever needed per-site code,
+and here you do that.
+
+It prints two tables: what it filled (check these before submitting) and
+what it left, **with the reason** — "sensitive question you have not
+answered, run `jobbot setup`" and "custom widget the filler could not
+drive" need different responses from you. A dead LLM quota degrades the
+fill rather than aborting it.
+
+Nothing is submitted by the agent in this mode, and a CAPTCHA or login
+hands the browser straight back to you.
+
 ## Quickstart
 
 Five commands from nothing to your first reviewed application.

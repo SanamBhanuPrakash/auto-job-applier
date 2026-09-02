@@ -43,7 +43,7 @@ from jobbot.learning.provenance import may_autofill_sensitive
 from jobbot.models import Application, Job
 from jobbot.resume import multi as multi_resume
 from jobbot.resume.schema import Profile
-from jobbot.submit import greenhouse, lever
+from jobbot.submit import ashby, greenhouse, lever
 from jobbot.submit.ats_detect import detect_ats
 from jobbot.submit.fill_planner import build_fill_plan
 from jobbot.submit.filler import apply_fill_plan, upload_resume
@@ -56,7 +56,7 @@ from jobbot.submit.verify import SubmissionVerdict, detect_blocking, verify_subm
 
 log = logging.getLogger(__name__)
 
-_ATS_MODULES = {"greenhouse": greenhouse, "lever": lever}
+_ATS_MODULES = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby}
 
 
 class UnsupportedATS(ValueError):
@@ -175,7 +175,10 @@ def apply_to_job(
                   reason=f"resume={job.matched_profile_tag or 'default'}", run_id=run_id)
             _park(app_id, ApplicationState.OPENING_APPLICATION, reason=job.url, run_id=run_id)
 
-            page.goto(job.url, wait_until="domcontentloaded", timeout=30000)
+            # Ashby serves the posting and the application form at
+            # different URLs; opening the posting would find no form.
+            target_url = getattr(ats_module, "apply_url", lambda u: u)(job.url)
+            page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
 
             # A wall here means we never even reach the form. Never try to
             # work around it — that is what gets accounts flagged.
