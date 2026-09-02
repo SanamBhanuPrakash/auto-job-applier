@@ -8,10 +8,13 @@ maps to several physical <input> elements.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field as dc_field
 
 from playwright.sync_api import Frame, Locator, Page
+
+log = logging.getLogger(__name__)
 
 # Most hosted-apply pages render the form directly; some employers embed it
 # via an <iframe> on their own branded careers page instead. Everything
@@ -163,19 +166,64 @@ def locate(page: FrameLike, spec: FieldSpec) -> Locator:
     return page.locator(f'[data-jobbot-id="{spec.field_id}"]')
 
 
-def find_target_frame(page: Page, ats_hint: str = "", timeout_ms: int = 15000) -> FrameLike:
-    """Poll the page (which may still be hydrating a JS-rendered form) for a
-    <form>, either at the top level or inside an iframe. If the employer's
-    own careers page embeds the ATS form in an iframe (common — see
-    module docstring), returns that iframe's Frame instead of the Page so
-    every downstream call (scan_form, fill, submit) operates on wherever
-    the form actually lives.
+#: Controls that make a context worth filling, even with no <form> tag.
+#: Includes ARIA roles because Workday, Darwinbox and friends build their
+#: widgets out of divs.
+_FILLABLE_SELECTOR = (
+    "input:not([type=hidden]):not([type=submit]):not([type=button]), "
+    "textarea, select, "
+    "[role=textbox], [role=combobox], [role=listbox], [role=radiogroup], "
+    "[role=checkbox], [role=spinbutton], [contenteditable=true]"
+)
 
-    Raises TimeoutError if no form shows up anywhere within timeout_ms —
-    that's a real "this employer's flow isn't a plain form" signal, not
-    something to guess past.
+#: How many fillable controls make a context an application form rather
+#: than a search box or a newsletter signup. Three is enough to exclude a
+#: site-search widget and low enough to admit a short screening page.
+_MIN_FILLABLE = 3
+
+
+def _fillable_count(ctx: FrameLike) -> int:
+    try:
+        return ctx.locator(_FILLABLE_SELECTOR).count()
+    except Exception:  # noqa: BLE001 - a detached frame counts as nothing
+        return 0
+
+
+def find_target_frame(
+    page: Page,
+    ats_hint: str = "",
+    timeout_ms: int = 15000,
+    *,
+    min_fillable: int = _MIN_FILLABLE,
+) -> FrameLike:
+    """Find the context holding the application form.
+
+    Preference order, and the order matters:
+
+    1. A real `<form>`, at the top level or in a matching iframe. This is
+       Greenhouse, Lever, Ashby and most hosted boards, and it stays the
+       first thing checked so nothing about those changes.
+    2. Failing that, a context carrying at least `min_fillable`
+       interactive controls.
+
+    Step 2 exists because **a large share of applications are not wrapped
+    in a `<form>` at all**. Fetching a Workday careers page returns a 6.5KB
+    SPA shell with zero `<form>` and zero `<input>`; after hydration it is
+    a tree of divs carrying `data-automation-id`, and its inputs never sit
+    inside a form element. Darwinbox, Keka and most React career sites are
+    the same shape.
+
+    Requiring `<form>` therefore rejected those pages outright — and
+    `scan_form` would have handled them perfectly, because it queries the
+    whole document rather than a form subtree. The scanner could already
+    read these pages; only this gate said no.
+
+    Raises TimeoutError when neither is found, which is still a real
+    "this is not a form-shaped page" signal rather than something to guess
+    past.
     """
     deadline = time.monotonic() + timeout_ms / 1000
+    best_seen = 0
     while True:
         if page.locator("form").count() > 0:
             return page
@@ -189,10 +237,28 @@ def find_target_frame(page: Page, ats_hint: str = "", timeout_ms: int = 15000) -
                     return frame
             except Exception:
                 continue
+
+        # No <form> anywhere. Fall back to whatever context actually has
+        # controls, preferring the richest one.
+        candidates: list[tuple[int, FrameLike]] = [(_fillable_count(page), page)]
+        for frame in page.frames:
+            if frame is page.main_frame:
+                continue
+            if ats_hint and ats_hint not in (frame.url or ""):
+                continue
+            candidates.append((_fillable_count(frame), frame))
+        count, ctx = max(candidates, key=lambda pair: pair[0])
+        best_seen = max(best_seen, count)
+        if count >= min_fillable:
+            log.info("No <form> element; using a context with %d fillable control(s)", count)
+            return ctx
+
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                f"No <form> found on the page or in a matching iframe within {timeout_ms}ms "
-                f"(looked for an iframe URL containing {ats_hint!r}). This employer's apply "
-                f"flow likely isn't a plain hosted form the generic scanner can handle."
+                f"No application form found within {timeout_ms}ms: no <form> element "
+                f"anywhere, and the richest context had only {best_seen} fillable "
+                f"control(s) (need {min_fillable}). Either the page has not finished "
+                f"loading, the application is behind a button or a login, or this "
+                f"employer's flow is not a form the generic scanner can handle."
             )
         page.wait_for_timeout(300)

@@ -231,6 +231,29 @@ fill rather than aborting it.
 Nothing is submitted by the agent in this mode, and a CAPTCHA or login
 hands the browser straight back to you.
 
+### Workday, Darwinbox, Keka and other multi-step applications
+
+```bash
+jobbot assist <url> --watch
+```
+
+These run the application as several steps — My Information, My
+Experience, Application Questions, Voluntary Disclosures, Review — and
+often advance **without changing the URL**. `--watch` notices each new
+step by what is on screen and fills it as you arrive. You click Next; it
+never does, because navigating a multi-step application unattended is how
+a half-finished one gets submitted.
+
+Create the account and sign in yourself first — the browser runs on your
+saved profile, so the session persists between runs.
+
+Two things had to be fixed before any of this worked, both found by
+checking the real thing rather than assuming: a Workday careers page
+serves a 6.5KB shell with **zero `<form>` and zero `<input>`**, and after
+hydration its inputs never sit inside a `<form>` at all. The scanner could
+always read such pages — it queries the whole document — but the
+form-finder required a `<form>` element and rejected them outright.
+
 ## Quickstart
 
 Five commands from nothing to your first reviewed application.

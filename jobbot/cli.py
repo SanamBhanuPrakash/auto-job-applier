@@ -725,6 +725,10 @@ def assist(
     url: str = typer.Argument(..., help="Any job application URL — any site, any ATS"),
     job_id: int = typer.Option(None, help="Link this to a discovered job, for the ledger"),
     no_llm: bool = typer.Option(False, "--no-llm", help="Fill only from profile + saved answers"),
+    watch: bool = typer.Option(
+        False, "--watch",
+        help="Keep filling as you move through a multi-step application (Workday, "
+             "Darwinbox, Keka). Stops when you close the browser."),
 ) -> None:
     """Open a posting, fill everything fillable, and hand the browser to you.
 
@@ -793,20 +797,67 @@ def assist(
                 except (EOFError, KeyboardInterrupt):
                     return
 
-            console.print(
-                "\n[green]The browser is yours.[/green] Check every field, fill anything "
-                "listed above, then press Submit there. Press Enter here when you are "
-                "done and I will close it."
-            )
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                pass
+            if watch:
+                _watch_and_fill(page, run_assist, url, profile, resume_path,
+                                autofill_sensitive, job_context, no_llm)
+            else:
+                console.print(
+                    "\n[green]The browser is yours.[/green] Check every field, fill "
+                    "anything listed above, then press Submit there. Press Enter here "
+                    "when you are done and I will close it."
+                )
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
         finally:
             try:
                 context.close()
             except Exception:  # noqa: BLE001
                 pass
+
+
+def _watch_and_fill(page, run_assist, url, profile, resume_path,
+                    autofill_sensitive, job_context, no_llm) -> None:
+    """Re-fill each time you land on a new step of the application.
+
+    Workday and friends run the application as several pages, often
+    without changing the URL, so this watches the visible fields rather
+    than the address bar. You click Next; it fills the page that appears.
+    It never clicks Next itself — navigating a multi-step application
+    unattended is how a half-finished application gets submitted.
+    """
+    from pathlib import Path as _Path
+
+    from jobbot.assist import page_signature
+
+    console.print("\n[green]Watching.[/green] Move through the application as normal — "
+                  "each new step gets filled as you reach it. Close the browser when "
+                  "you are done.")
+    seen = {page_signature(page)}
+    while True:
+        try:
+            page.wait_for_timeout(1500)
+            if page.is_closed():
+                break
+            signature = page_signature(page)
+        except Exception:  # noqa: BLE001 - the browser going away ends the watch
+            break
+        if not signature or signature in seen:
+            continue
+        seen.add(signature)
+        console.print("\n[bold]New step detected — filling...[/bold]")
+        try:
+            result = run_assist(
+                page, url, profile, _Path(resume_path) if resume_path else None,
+                autofill_sensitive=autofill_sensitive,
+                job_context=job_context, use_llm=not no_llm,
+            )
+            _render_assist(result)
+        except Exception as exc:  # noqa: BLE001 - one bad step must not end the watch
+            console.print(f"[yellow]Could not fill this step "
+                          f"({type(exc).__name__}); carry on manually.[/yellow]")
+    console.print("\n[green]Browser closed.[/green]")
 
 
 def _render_assist(result) -> None:

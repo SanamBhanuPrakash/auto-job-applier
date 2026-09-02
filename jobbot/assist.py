@@ -213,6 +213,38 @@ def assist(
     return result
 
 
+def page_signature(page) -> str:
+    """A cheap fingerprint of "which step of the application am I on".
+
+    Workday, Darwinbox and Keka run the application as several steps —
+    My Information, My Experience, Application Questions, Voluntary
+    Disclosures, Review — and many of them do it without changing the URL.
+    Watching the URL alone would therefore miss every step transition, so
+    the signature includes the set of field labels on screen.
+    """
+    try:
+        # Playwright keeps returning the last URL after a page closes, so
+        # asking for it is not enough to notice the browser is gone — the
+        # watch loop would then keep hashing a dead page forever. Check
+        # explicitly, and return "" to mean "no signature available".
+        if page.is_closed():
+            return ""
+        url = page.url or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        labels = page.evaluate(
+            """() => [...document.querySelectorAll('label, [role=combobox], [aria-label]')]
+                   .slice(0, 60)
+                   .map(e => (e.getAttribute('aria-label') || e.textContent || '').trim())
+                   .filter(Boolean).join('|')"""
+        )
+    except Exception:  # noqa: BLE001
+        labels = ""
+    import hashlib
+    return hashlib.sha256(f"{url}||{labels}".encode("utf-8")).hexdigest()[:16]
+
+
 def _why(spec: FieldSpec, memory, plan: dict, circuit_broken: set,
          failed_ids: set, autofill_sensitive: bool) -> str:
     if spec.field_id in failed_ids:

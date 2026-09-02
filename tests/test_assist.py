@@ -205,3 +205,52 @@ def test_an_llm_outage_still_fills_from_your_profile(page, profile, monkeypatch)
     assert result.form_found is True
     assert len(result.filled) >= 1
     assert any("LLM unavailable" in n for n in result.notes)
+
+
+# --- multi-step applications (Workday, Darwinbox, Keka) -------------------
+
+
+def test_it_fills_a_workday_shaped_page_with_no_form_element(page, profile):
+    """The blocker that kept Workday out entirely: no <form> anywhere."""
+    page.set_content("""
+      <div data-automation-id="jobApplication">
+        <div><label for="fn">First Name</label><input id="fn"></div>
+        <div><label for="ln">Last Name</label><input id="ln"></div>
+        <div><label for="em">Email Address</label><input id="em" type="email"></div>
+        <div><label for="ph">Phone Number</label><input id="ph" type="tel"></div>
+      </div>
+    """)
+    result = assist(page, "https://acme.wd5.myworkdayjobs.com/x", profile, None,
+                    autofill_sensitive=False, use_llm=False)
+    assert result.form_found is True
+    assert len(result.filled) >= 2, result.left_for_you
+    assert page.input_value("#em") != ""
+
+
+def test_a_step_change_without_a_url_change_is_detected(page):
+    """Workday advances steps without navigating, so watching the URL
+    alone would never notice. The signature includes visible labels."""
+    from jobbot.assist import page_signature
+
+    page.set_content("<div><label for=a>First Name</label><input id=a></div>")
+    step1 = page_signature(page)
+    page.set_content("<div><label for=b>Work Experience</label><input id=b></div>")
+    step2 = page_signature(page)
+    assert step1 and step2 and step1 != step2
+
+
+def test_the_same_step_keeps_the_same_signature(page):
+    """Otherwise the watcher would re-fill the same page forever."""
+    from jobbot.assist import page_signature
+
+    page.set_content("<div><label for=a>First Name</label><input id=a></div>")
+    assert page_signature(page) == page_signature(page)
+
+
+def test_the_signature_survives_a_closed_page(page):
+    """The watch loop ends on browser close; it must not raise there."""
+    from jobbot.assist import page_signature
+
+    page.set_content("<div><label for=a>Name</label><input id=a></div>")
+    page.close()
+    assert page_signature(page) == ""
